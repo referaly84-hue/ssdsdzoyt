@@ -3140,7 +3140,103 @@ var FOREIGN_CLUBS = [
   { id: "alhilal", name: "Аль-Хиляль", country: "Саудовская Аравия", flag: "🇸🇦", league: "Про-лига", reputation: 83 },
   { id: "alnasr", name: "Аль-Наср", country: "Саудовская Аравия", flag: "🇸🇦", league: "Про-лига", reputation: 82 }
 ];
-function estimateForeignFeeMln(player2: any, offerType: "transfer" | "loan"): number {
+function collectPlayerSeasonScoutProfile(db2: any, pid: string, currentFixture?: any, currentMatch?: any) {
+  const targetSeason = db2?.settings?.season || (typeof S === "function" ? S() : "2026/27");
+  const allFx = Array.isArray(db2?.fixtures) ? db2.fixtures : [];
+  const watchMap = (db2.scoutWatchlist && typeof db2.scoutWatchlist === "object") ? db2.scoutWatchlist : (db2.scoutWatchlist = {});
+  const watch = watchMap[pid] || (watchMap[pid] = { heat: 0, ratingsByFixture: {}, motmFixtures: {}, watchedClubId: null, updatedAt: "" });
+  if (!watch.ratingsByFixture || typeof watch.ratingsByFixture !== "object") watch.ratingsByFixture = {};
+  if (!watch.motmFixtures || typeof watch.motmFixtures !== "object") watch.motmFixtures = {};
+
+  const officialDone = allFx
+    .filter((f: any) =>
+      f && f.status === "done" &&
+      f.comp !== "friendly" &&
+      (!f.season || f.season === targetSeason) &&
+      f.st?.players?.[pid] &&
+      ((Number(f.st.players[pid].min) || 0) > 0 || f.st.players[pid].started === true)
+    )
+    .sort((a: any, b: any) => String(a.date || "").localeCompare(String(b.date || "")) || String(a.time || "").localeCompare(String(b.time || "")));
+
+  const teamNameLookup = (tid: string) => {
+    if (typeof tn === "function") return tn(tid);
+    return (db2?.teams || []).find((t: any) => t.id === tid)?.name || tid;
+  };
+
+  let games = 0;
+  let minutes = 0;
+  let goals = 0;
+  let assists = 0;
+  let saves = 0;
+  let cleanSheets = 0;
+  let tackles = 0;
+  let motmCount = 0;
+  const ratingSeq: number[] = [];
+
+  for (const f of officialDone) {
+    const ps = f.st.players[pid] || {};
+    games += 1;
+    minutes += Number(ps.min || 0);
+    goals += Number(ps.g || 0);
+    assists += Number(ps.a || 0);
+    saves += Number(ps.sv || 0);
+    cleanSheets += Number(ps.cs || 0);
+    tackles += Number(ps.tk || 0);
+
+    let rVal = Number(watch.ratingsByFixture[f.id]);
+    if (!Number.isFinite(rVal) || rVal <= 0) {
+      let ratingsArr: any[] = [];
+      if (currentFixture && currentFixture.id === f.id && Array.isArray(currentMatch?.ratings)) {
+        ratingsArr = currentMatch.ratings;
+      } else if (typeof getMatch === "function") {
+        const cachedM = getMatch(f.id);
+        if (Array.isArray(cachedM?.ratings)) ratingsArr = cachedM.ratings;
+      }
+      if (!ratingsArr.length && typeof computeMatchRatings === "function") {
+        ratingsArr = computeMatchRatings({ stats: f.st }, f, teamNameLookup(f.home), teamNameLookup(f.away));
+      }
+      const foundR = ratingsArr.find((x: any) => (x.playerId || x.id) === pid);
+      rVal = Number(foundR?.rating || 6.5);
+      watch.ratingsByFixture[f.id] = rVal;
+    }
+
+    const isFixtureMotm = Boolean(
+      watch.motmFixtures[f.id] ||
+      f.motm?.pid === pid ||
+      f.motm?.playerId === pid ||
+      (currentFixture?.id === f.id && (currentMatch?.motm?.pid === pid || currentMatch?.motm?.playerId === pid))
+    );
+    if (isFixtureMotm) {
+      watch.motmFixtures[f.id] = true;
+      motmCount += 1;
+    }
+    ratingSeq.push(rVal);
+  }
+
+  const avgRating = ratingSeq.length ? +(ratingSeq.reduce((s, v) => s + v, 0) / ratingSeq.length).toFixed(2) : 0;
+  const last5 = ratingSeq.slice(-5);
+  const last5AvgRating = last5.length ? +(last5.reduce((s, v) => s + v, 0) / last5.length).toFixed(2) : 0;
+  const last5StrongCount = last5.filter((v) => v >= 7.1).length;
+  const lastMatchRating = ratingSeq.length ? ratingSeq[ratingSeq.length - 1] : 0;
+
+  return {
+    season: targetSeason,
+    games,
+    minutes,
+    goals,
+    assists,
+    saves,
+    cleanSheets,
+    tackles,
+    motmCount,
+    avgRating,
+    last5AvgRating,
+    last5StrongCount,
+    lastMatchRating,
+    recentRatings: last5
+  };
+}
+function estimateForeignFeeMln(player2: any, offerType: "transfer" | "loan", seasonStats?: any): number {
   const ovr = Number(player2?.ovr || player2?.rating || 74);
   const age = Number(player2?.age || 25);
   const mvRaw = Number(player2?.marketValue || 0);
@@ -3155,56 +3251,95 @@ function estimateForeignFeeMln(player2: any, offerType: "transfer" | "loan"): nu
     else baseMln = 0.5 + Math.max(0, ovr - 65) * 0.1;
   }
   const ageMult = age <= 21 ? 1.28 : age <= 24 ? 1.15 : age <= 28 ? 1.0 : age <= 31 ? 0.8 : 0.6;
-  const randomSpread = 1.04 + Math.random() * 0.24;
-  let feeMln = baseMln * ageMult * randomSpread;
+  let formMult = 1.0;
+  if (seasonStats && seasonStats.games >= 3) {
+    const avgR = Number(seasonStats.avgRating || 6.8);
+    if (avgR >= 7.5) formMult += 0.22;
+    else if (avgR >= 7.2) formMult += 0.12;
+    if ((seasonStats.goals || 0) + (seasonStats.assists || 0) >= 6) formMult += 0.08;
+  }
+  const randomSpread = 1.02 + Math.random() * 0.2;
+  let feeMln = baseMln * ageMult * formMult * randomSpread;
   if (offerType === "loan") {
-    feeMln = Math.max(0.3, Math.min(2.5, feeMln * 0.18));
+    feeMln = Math.max(0.3, Math.min(2.8, feeMln * 0.18));
   } else {
-    feeMln = Math.max(0.5, Math.min(35, feeMln));
+    feeMln = Math.max(0.5, Math.min(38, feeMln));
   }
   return Math.round(feeMln * 10) / 10;
 }
-function pickMatchingForeignClub(player2: any, preferredName?: string) {
-  if (preferredName) {
-    const found = FOREIGN_CLUBS.find((c) => c.name.toLowerCase() === String(preferredName).trim().toLowerCase());
+function pickMatchingForeignClub(player2: any, preferredNameOrId?: string) {
+  if (preferredNameOrId) {
+    const key = String(preferredNameOrId).trim().toLowerCase();
+    const found = FOREIGN_CLUBS.find((c) => c.id.toLowerCase() === key || c.name.toLowerCase() === key);
     if (found) return found;
   }
   const ovr = Number(player2?.ovr || player2?.rating || 74);
+  const age = Number(player2?.age || 25);
   let pool = FOREIGN_CLUBS;
   if (ovr >= 80) pool = FOREIGN_CLUBS.filter((c) => c.reputation >= 80);
   else if (ovr >= 75) pool = FOREIGN_CLUBS.filter((c) => c.reputation >= 76 && c.reputation <= 83);
   else pool = FOREIGN_CLUBS.filter((c) => c.reputation <= 78);
+
+  if (age <= 22) {
+    const talentLeagues = pool.filter((c) => ["Португалия", "Нидерланды", "Бельгия", "Франция", "Италия", "Испания", "Германия"].includes(c.country));
+    if (talentLeagues.length) pool = talentLeagues;
+  } else if (age >= 29) {
+    const expLeagues = pool.filter((c) => ["Турция", "Греция", "Сербия", "Саудовская Аравия"].includes(c.country));
+    if (expLeagues.length) pool = expLeagues;
+  }
   if (!pool.length) pool = FOREIGN_CLUBS;
   return pool[Math.floor(Math.random() * pool.length)];
 }
-async function createForeignOfferWithAI(options: { player: any; club: any; performanceReason?: string; triggerReason?: string; preferLoan?: boolean }) {
+function formatSeasonSummaryText(pObj: any, st: any): string {
+  if (!st || !st.games) return "";
+  const isGk = pObj?.pos === "ВР";
+  const parts = [`${st.games} ${ruPlural(st.games, "матч", "матча", "матчей")}`, `ср. оценка ${st.avgRating}`];
+  if (isGk) {
+    if (st.cleanSheets > 0) parts.push(`${st.cleanSheets} на ноль`);
+    if (st.saves > 0) parts.push(`${st.saves} ${ruPlural(st.saves, "сейв", "сейва", "сейвов")}`);
+  } else {
+    if (st.goals > 0) parts.push(`${st.goals} ${ruPlural(st.goals, "гол", "гола", "голов")}`);
+    if (st.assists > 0) parts.push(`${st.assists} ${ruPlural(st.assists, "ассист", "ассиста", "ассистов")}`);
+    if (st.goals === 0 && st.assists === 0 && st.tackles > 0) parts.push(`${st.tackles} отборов`);
+  }
+  if (st.last5AvgRating >= 7.1 && st.games >= 4) {
+    parts.push(`${st.last5StrongCount} из 5 последних игр ≥ 7.1`);
+  }
+  return parts.join(" · ");
+}
+async function createForeignOfferWithAI(options: { player: any; club: any; performanceReason?: string; triggerReason?: string; preferLoan?: boolean; seasonStats?: any; preferredBuyerId?: string }) {
   const player2 = options.player;
   const club = options.club;
   const ovr = Number(player2?.ovr || player2?.rating || 74);
   const age = Number(player2?.age || 25);
-  let offerType: "transfer" | "loan" = options.preferLoan || (age <= 22 && ovr < 77 && Math.random() < 0.35) || Math.random() < 0.18 ? "loan" : "transfer";
-  let buyer = pickMatchingForeignClub(player2);
-  let feeAmount = estimateForeignFeeMln(player2, offerType);
+  const st = options.seasonStats;
+  let offerType: "transfer" | "loan" = options.preferLoan || (age <= 22 && ovr < 77 && Math.random() < 0.32) || Math.random() < 0.16 ? "loan" : "transfer";
+  let buyer = pickMatchingForeignClub(player2, options.preferredBuyerId);
+  let feeAmount = estimateForeignFeeMln(player2, offerType, st);
   let wage = `€${Math.round(clamp(feeAmount * 7.5 + (ovr - 65) * 1.4, 10, 140))} тыс./нед.`;
-  let triggerReason = options.triggerReason || options.performanceReason || `Уверенная игра и высокий рейтинг (${ovr}) в составе «${club?.name || "клуба"}»`;
-  let scoutReport = options.performanceReason || `Международные скауты клуба «${buyer.name}» высоко оценили игру ${player2?.name || "футболиста"} (${player2?.pos || "ЦП"}, рейтинг ${ovr}) и видят в нём готовое усиление состава.`;
+  const seasonStr = formatSeasonSummaryText(player2, st);
+  let triggerReason = options.triggerReason || (seasonStr ? `Стабильная игра по сезону: ${seasonStr}` : options.performanceReason) || `Уверенная игра и высокий рейтинг (${ovr}) в составе «${club?.name || "клуба"}»`;
+  let scoutReport = options.performanceReason || (seasonStr
+    ? `Скауты клуба «${buyer.name}» вели ${player2?.name || "игрока"} на протяжении сезона (${seasonStr}) и считают его готовым усилением состава.`
+    : `Международные скауты клуба «${buyer.name}» высоко оценили игру ${player2?.name || "футболиста"} (${player2?.pos || "ЦП"}, рейтинг ${ovr}) и видят в нём готовое усиление состава.`);
 
   if (typeof hasLLM === "function" && hasLLM() && typeof llmJSON === "function") {
     try {
       const clubList = FOREIGN_CLUBS.map((c) => `${c.name} (${c.country}, ${c.league}, рейтинг ${c.reputation})`).join("; ");
-      const sys = "Ты — международный футбольный скаут. Сгенерируй реалистичное зарубежное трансферное предложение для игрока российского клуба. Отвечай строго в JSON.";
-      const prompt = `Игрок: ${player2?.name || "Игрок"}, позиция: ${player2?.pos || "ЦП"}, возраст: ${age}, рейтинг: ${ovr}, клуб: «${club?.name || "Клуб"}».
+      const sys = "Ты — международный футбольный скаут. Сгенерируй реалистичное зарубежное трансферное предложение на основе формы игрока в текущем сезоне. Отвечай строго в JSON.";
+      const prompt = `Игрок: ${player2?.name || "Игрок"}, позиция: ${player2?.pos || "ЦП"}, возраст: ${age}, OVR: ${ovr}, клуб: «${club?.name || "Клуб"}».
+Сезонная статистика и форма: ${seasonStr || "данные за карьеру/рейтинг"}.
 Повод интереса: ${triggerReason}.
 Базовый расчёт цены: €${feeAmount}M (${offerType === "loan" ? "аренда" : "полноценный выкуп"}).
-Выбери подходящий зарубежный клуб из списка (или сопоставимый): ${clubList}.
+Клуб-наблюдатель: ${buyer.name}. Доступные клубы: ${clubList}.
 Верни JSON строго в формате:
 {
   "buyerClub": "Название клуба",
   "type": "transfer" или "loan",
-  "feeAmount": число_в_миллионах_евро (реалистично от 0.4 до 30.0),
+  "feeAmount": число_в_миллионах_евро (реалистично от 0.4 до 35.0),
   "wage": "€XX тыс./нед.",
-  "triggerReason": "короткий конкретный повод (1 фраза)",
-  "scoutReport": "краткий профессиональный отчёт скаута (1-2 предложения на русском)"
+  "triggerReason": "короткий конкретный повод по сезону (1 фраза)",
+  "scoutReport": "профессиональный отчёт скаута по сезонной игре (1-2 предложения на русском)"
 }`;
       const aiRes = await llmJSON(sys, prompt, { task: "foreign-scout-offer", temp: 0.45, max: 600 });
       if (aiRes && typeof aiRes === "object") {
@@ -3250,6 +3385,7 @@ async function createForeignOfferWithAI(options: { player: any; club: any; perfo
     wage,
     triggerReason,
     scoutReport,
+    seasonStats: st || null,
     status: "pending",
     date: (/* @__PURE__ */ new Date()).toISOString()
   };
@@ -3258,6 +3394,7 @@ async function checkForeignInterestAfterMatch(db2: any, match: any, fixture: any
   if (!db2 || !match || !fixture || fixture.comp === "friendly") return [];
   if (!Array.isArray(db2.foreignOffers)) db2.foreignOffers = [];
   if (!Array.isArray(db2.transfers)) db2.transfers = [];
+  if (!db2.scoutWatchlist || typeof db2.scoutWatchlist !== "object") db2.scoutWatchlist = {};
 
   const hName = typeof tn === "function" ? tn(fixture.home) : fixture.home;
   const aName = typeof tn === "function" ? tn(fixture.away) : fixture.away;
@@ -3270,10 +3407,9 @@ async function checkForeignInterestAfterMatch(db2: any, match: any, fixture: any
 
   const motmId = match.motm?.playerId || match.motm?.id || null;
   const now = Date.now();
-  const recentRejectedCutoff = now - 7 * 864e5;
-  const scoreText = `${hName} ${fixture.hg ?? 0}:${fixture.ag ?? 0} ${aName}`;
+  const recentRejectedCutoff = now - 14 * 864e5;
+  const readyCandidates: any[] = [];
 
-  const candidates = [];
   for (const r of ratings) {
     const pid = r.playerId || r.id;
     if (!pid) continue;
@@ -3281,10 +3417,44 @@ async function checkForeignInterestAfterMatch(db2: any, match: any, fixture: any
     if (!pObj || (pObj.teamId !== fixture.home && pObj.teamId !== fixture.away)) continue;
     const clubObj = (db2.teams || []).find((x: any) => x.id === pObj.teamId);
     if (!clubObj) continue;
-    // Focus foreign scouts mainly on RPL, FNL, and Cup matches
     if (!["rpl", "fnl", "cup", "supercup"].includes(fixture.comp) && !["rpl", "fnl"].includes(clubObj.comp)) continue;
 
-    // Skip if player already has a pending foreign offer or was rejected recently
+    // Update season scout watchlist even for players not yet ready for an offer
+    const st = collectPlayerSeasonScoutProfile(db2, pid, fixture, match);
+    const watch = db2.scoutWatchlist[pid];
+    const mRating = Number(r.rating || st.lastMatchRating || 6.5);
+    const goals = Number(r.goals || 0);
+    const assists = Number(r.assists || 0);
+    const isMotm = motmId === pid;
+    const baseOvr = Number(pObj.ovr || pObj.rating || 70);
+    const age = Number(pObj.age || 25);
+
+    let delta = 0;
+    if (mRating >= 8.0 || goals + assists >= 2 || isMotm) delta = 22;
+    else if (mRating >= 7.4 || goals + assists >= 1) delta = 15;
+    else if (mRating >= 7.0) delta = 10;
+    else if (mRating >= 6.6) delta = 3;
+    else if (mRating < 6.2) delta = -8;
+    if (age <= 22 && delta > 0) delta += 3;
+    if (baseOvr >= 78 && delta > 0) delta += 2;
+
+    watch.heat = Math.max(0, Math.min(100, Math.round((watch.heat || 0) + delta)));
+    watch.clubId = clubObj.id;
+    watch.playerName = pObj.name;
+    watch.pos = pObj.pos || "ЦП";
+    watch.games = st.games;
+    watch.avgRating = st.avgRating;
+    watch.last5AvgRating = st.last5AvgRating;
+    watch.goals = st.goals;
+    watch.assists = st.assists;
+    watch.cleanSheets = st.cleanSheets;
+    watch.saves = st.saves;
+    watch.updatedAt = new Date().toISOString();
+    if (!watch.watchedClubId && watch.heat >= 25) {
+      watch.watchedClubId = pickMatchingForeignClub(pObj).id;
+    }
+
+    // Eligibility checks for sending an actual transfer offer
     const hasPending = db2.foreignOffers.some((o: any) => (o.pid === pid || o.playerId === pid) && o.status === "pending");
     if (hasPending) continue;
     const clubPendingCount = db2.foreignOffers.filter((o: any) => o.clubId === clubObj.id && o.status === "pending").length;
@@ -3294,45 +3464,61 @@ async function checkForeignInterestAfterMatch(db2: any, match: any, fixture: any
     );
     if (recentlyRejected) continue;
 
-    const mRating = Number(r.rating || 6.5);
-    const goals = Number(r.goals || 0);
-    const assists = Number(r.assists || 0);
-    const saves = Number(r.saves || 0);
-    const cs = Number(r.cs || 0);
-    const isMotm = motmId === pid;
-    const baseOvr = Number(pObj.ovr || pObj.rating || 70);
-    const age = Number(pObj.age || 25);
+    // Require genuine season sample (at least 4 official games, or 3 for U22 standout talents)
+    const minGames = age <= 22 ? 3 : 4;
+    if (st.games < minGames) continue;
+    // Do not send an offer right after a poor game
+    if (mRating < 6.5) continue;
 
-    const standout = isMotm || mRating >= 7.7 || goals + assists >= 2 || (saves >= 5 && cs > 0) || (baseOvr >= 78 && mRating >= 7.3) || (age <= 22 && baseOvr >= 72 && mRating >= 7.3);
-    if (!standout) continue;
+    const isGk = pObj.pos === "ВР";
+    const isDef = ["ЦЗ", "ЛЗ", "ПЗ", "ОП"].includes(pObj.pos);
+    const strongSeasonRating = st.avgRating >= (isDef || isGk ? 7.12 : 7.20);
+    const strongLast5Form = st.games >= 4 && st.last5AvgRating >= 7.22 && st.last5StrongCount >= 3;
+    const strongOutput = isGk
+      ? (st.cleanSheets >= 3 || (st.saves / Math.max(1, st.games)) >= 3.2) && st.avgRating >= 7.0
+      : (st.goals + st.assists >= 4 && st.avgRating >= 7.05);
+    const youngBreakout = age <= 22 && baseOvr >= 72 && st.avgRating >= 7.12 && st.games >= 3;
 
-    let priority = mRating * 10 + goals * 8 + assists * 5 + (isMotm ? 10 : 0) + Math.max(0, baseOvr - 70);
-    if (age <= 23) priority += 5;
-    candidates.push({ r, pObj, clubObj, priority, isMotm, mRating, goals, assists, saves, cs });
+    const qualifiedBySeason = strongSeasonRating || strongLast5Form || strongOutput || youngBreakout;
+    if (!qualifiedBySeason) continue;
+    if (watch.heat < 60) continue;
+
+    const seasonPriority =
+      st.avgRating * 14 +
+      Math.max(0, st.last5AvgRating - 6.5) * 10 +
+      st.goals * 2.5 +
+      st.assists * 2.0 +
+      (isGk ? st.cleanSheets * 2.5 + st.saves * 0.25 : 0) +
+      st.last5StrongCount * 3.5 +
+      watch.heat * 0.3 +
+      (age <= 22 ? 6 : 0) +
+      Math.max(0, baseOvr - 72);
+
+    readyCandidates.push({ pObj, clubObj, st, watch, priority: seasonPriority });
   }
 
-  if (!candidates.length) return [];
-  candidates.sort((a, b) => b.priority - a.priority);
-  const best = candidates[0];
+  if (!readyCandidates.length) return [];
+  readyCandidates.sort((a, b) => b.priority - a.priority);
+  const best = readyCandidates[0];
 
-  // Organic probability check: higher chance for truly exceptional performances, avoid flooding every match
-  const prob = best.isMotm || best.mRating >= 8.3 || best.goals + best.assists >= 2 ? 0.35 : 0.2;
+  // Organic trigger probability grows with accumulated scout heat and season rating
+  const prob = best.watch.heat >= 85 || best.st.avgRating >= 7.55 ? 0.45 : best.watch.heat >= 72 ? 0.33 : 0.24;
   if (Math.random() > prob) return [];
 
-  const reasons: string[] = [];
-  if (best.isMotm) reasons.push("лучший игрок матча (MOTM)");
-  if (best.goals > 0) reasons.push(`${best.goals} ${ruPlural(best.goals, "гол", "гола", "голов")}`);
-  if (best.assists > 0) reasons.push(`${best.assists} ${ruPlural(best.assists, "ассист", "ассиста", "ассистов")}`);
-  if (best.saves >= 4) reasons.push(`${best.saves} сейвов${best.cs ? " и сухой матч" : ""}`);
-  reasons.push(`оценка ${best.mRating.toFixed(1)}`);
-
-  const triggerReason = `${reasons.join(", ")} в матче ${scoreText}`;
+  const summary = formatSeasonSummaryText(best.pObj, best.st);
+  const triggerReason = `Сезонная форма: ${summary}`;
   const offer = await createForeignOfferWithAI({
     player: best.pObj,
     club: best.clubObj,
+    seasonStats: best.st,
+    preferredBuyerId: best.watch.watchedClubId,
     triggerReason,
-    performanceReason: `Скауты впечатлены выступлением ${best.pObj.name} (${triggerReason}).`
+    performanceReason: `Зарубежные скауты вели ${best.pObj.name} на протяжении сезона (${summary}) и направили официальное предложение.`
   });
+
+  // Reset scout heat after submitting an offer and pick a fresh watching club for potential future cycles
+  best.watch.heat = 20;
+  best.watch.watchedClubId = null;
 
   db2.foreignOffers.push(offer);
   db2.transfers.push({
@@ -14154,6 +14340,27 @@ app.get("/api/club", needClub, (req, res) => {
     outgoingTransfers: outgoing,
     foreignOffers: (db.foreignOffers || []).filter((o) => o.clubId === req.tid && o.status === "pending"),
     foreignHistory: (db.foreignOffers || []).filter((o) => o.clubId === req.tid && o.status !== "pending").slice(-10).reverse(),
+    foreignWatchlist: Object.entries(db.scoutWatchlist || {})
+      .filter(([pid, w]: [string, any]) => w && w.heat >= 20 && player(pid)?.teamId === req.tid)
+      .map(([pid, w]: [string, any]) => {
+        const pObj = player(pid);
+        const buyer = w.watchedClubId ? pickMatchingForeignClub(pObj, w.watchedClubId) : null;
+        return {
+          pid,
+          playerName: pObj?.name || w.playerName || "Игрок",
+          pos: pObj?.pos || w.pos || "ЦП",
+          heat: w.heat || 0,
+          games: w.games || 0,
+          avgRating: w.avgRating || 0,
+          goals: w.goals || 0,
+          assists: w.assists || 0,
+          cleanSheets: w.cleanSheets || 0,
+          saves: w.saves || 0,
+          watchedBy: buyer ? { name: buyer.name, country: buyer.country, flag: buyer.flag, league: buyer.league } : null
+        };
+      })
+      .sort((a, b) => b.heat - a.heat || b.avgRating - a.avgRating)
+      .slice(0, 6),
     budget: t.budget || 0,
     formattedBudget: (t.budget || 0) < 0 ? "-\u20AC" + Math.abs(Math.round(t.budget || 0)).toLocaleString("ru-RU") : "\u20AC" + Math.round(t.budget || 0).toLocaleString("ru-RU"),
     budgetHistory: (Array.isArray(db.budgetHistory) ? db.budgetHistory : []).filter((h) => h.teamId === req.tid).slice(-20).reverse(),
@@ -14495,11 +14702,13 @@ app.post("/api/club/scout-request", admin, needClub, async (req, res) => {
   const requestedPlayer = req.body?.playerId ? sorted.find((p) => p.id === req.body.playerId) : null;
   const candidate = requestedPlayer || sorted.find((p) => !pendingPids.has(p.id)) || sorted[0];
   try {
+    const seasonProfile = collectPlayerSeasonScoutProfile(db, candidate.id);
     const offer = await createForeignOfferWithAI({
       player: candidate,
       club: t,
-      triggerReason: req.body?.reason || `Стабильное лидерство в «${t.name}» (рейтинг ${candidate.ovr || candidate.rating || 75})`,
-      performanceReason: req.body?.reason || `Высокий класс игры и стабильное лидерство в составе «${t.name}» (рейтинг ${candidate.ovr || candidate.rating || 75})`
+      seasonStats: seasonProfile,
+      triggerReason: req.body?.reason || undefined,
+      performanceReason: req.body?.reason || undefined
     });
     if (!db.foreignOffers) db.foreignOffers = [];
     db.foreignOffers.push(offer);
@@ -15425,10 +15634,13 @@ app.post("/api/admin/foreign-offers/generate", admin, async (req, res) => {
   const clb = team(p.teamId);
   if (!clb) return fail(res, "\u041A\u043B\u0443\u0431 \u0438\u0433\u0440\u043E\u043A\u0430 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D");
   try {
+    const seasonProfile = collectPlayerSeasonScoutProfile(db, p.id);
     const offer = await createForeignOfferWithAI({
       player: p,
       club: clb,
-      performanceReason: req.body.reason || `\u041E\u0442\u043B\u0438\u0447\u043D\u0430\u044F \u0444\u043E\u0440\u043C\u0430 \u0438 \u0443\u0432\u0435\u0440\u0435\u043D\u043D\u0430\u044F \u0438\u0433\u0440\u0430 \u0432 \u0447\u0435\u043C\u043F\u0438\u043E\u043D\u0430\u0442\u0435 (\u0440\u0435\u0439\u0442\u0438\u043D\u0433 ${p.rating || 75})`
+      seasonStats: seasonProfile,
+      triggerReason: req.body?.reason || undefined,
+      performanceReason: req.body?.reason || undefined
     });
     if (!db.foreignOffers) db.foreignOffers = [];
     db.foreignOffers.push(offer);

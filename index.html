@@ -7511,7 +7511,7 @@ async function pgClub(app) {
               <span>🌍 Международный скаутинг и трансферы за рубеж</span>
             </div>
             <p style="margin:6px 0 0;font-size:13.5px;color:#d1fae5;line-height:1.45">
-              Искусственный интеллект отслеживает матчи чемпионата России. Если футболисты вашего клуба показывают высокий класс игры, получают награды MOTM и высокие оценки, зарубежные клубы Европы и мира присылают официальные предложения о покупке или аренде.
+              Зарубежные скауты отслеживают выступления футболистов на дистанции всего сезона: стабильно высокие оценки в нескольких турах подряд, результативные серии, сухие матчи и прогресс молодых талантов. Клубы Европы и мира сначала берут игрока «на карандаш», а затем направляют официальное предложение.
             </p>
           </div>
           ${S.me?.role === 'admin' ? `
@@ -7596,11 +7596,38 @@ async function pgClub(app) {
             <div style="font-size:36px;margin-bottom:8px">🔭</div>
             <div style="font-weight:700;font-size:15px;color:#1e293b">Активных зарубежных предложений сейчас нет</div>
             <p class="muted small" style="max-width:500px;margin:6px auto 14px">
-              Европейские и мировые скауты обращают внимание на игроков после ярких матчей: голов, ассистов, высоких оценок и званий MOTM.${S.me?.role === 'admin' ? ' Вы также можете запросить оценку скаутов прямо сейчас по кнопке выше.' : ''}
+              Скауты оценивают форму игроков на дистанции сезона (от 3–4 официальных матчей): среднюю оценку, стабильность в последних турах, голы, ассисты и сухие матчи.${S.me?.role === 'admin' ? ' Вы также можете запросить оценку скаутов прямо сейчас по кнопке выше.' : ''}
             </p>
           </div>
         `}
       </div>
+
+      ${(c.foreignWatchlist && c.foreignWatchlist.length) ? `
+        <div class="panel" style="margin-top:16px">
+          <div class="row sp" style="margin-bottom:10px;align-items:center">
+            <h3 style="margin:0;font-size:15px">📡 На карандаше у зарубежных скаутов (${c.foreignWatchlist.length})</h3>
+            <span class="muted small">Наблюдение по итогам матчей сезона</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            ${c.foreignWatchlist.map(w => `
+              <div class="row sp" style="padding:10px 12px;background:var(--soft);border-radius:8px;border:1px solid var(--line);flex-wrap:wrap;gap:8px">
+                <div>
+                  <b>${e(w.playerName)}</b> <span class="tag sm">${e(w.pos)}</span>
+                  <div class="muted small" style="margin-top:2px">
+                    ${w.games} игр · ср. оценка <b>${w.avgRating}</b>${w.pos === 'ВР' ? (w.cleanSheets ? ` · ${w.cleanSheets} на ноль` : '') : ((w.goals || w.assists) ? ` · ${w.goals}Г + ${w.assists}П` : '')}
+                    ${w.watchedBy ? ` · Следит: <b>${e(w.watchedBy.name)}</b> ${w.watchedBy.flag || ''}` : ''}
+                  </div>
+                </div>
+                <div style="text-align:right">
+                  <span class="tag" style="background:${w.heat >= 60 ? '#fef3c7;color:#92400e' : '#e0f2fe;color:#075985'};font-weight:700">
+                    Интерес: ${w.heat}%
+                  </span>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      ` : ''}
 
       ${hist.length ? `
         <div class="panel" style="margin-top:16px">
