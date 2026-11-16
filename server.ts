@@ -1769,12 +1769,26 @@ function runImport(db2, parsed, options) {
 // src/cup2026.ts
 var CUP_FINAL_VENUE = "\u041B\u0443\u0436\u043D\u0438\u043A\u0438 (\u041C\u043E\u0441\u043A\u0432\u0430)";
 function initCup2026(season, rplTeams, fnlTeams, secondLeagueTeams, mediaTeams, uidFn, options) {
-  const groups = {
-    A: [],
-    B: [],
-    C: [],
-    D: []
-  };
+  const calBase = options?.calBase || "2026-07-18";
+  const defaultRegOffsets = [3, 17, 31, 66, 94, 115];
+  const regWeeks = Array.isArray(options?.regWeeks) && options.regWeeks.length >= 6
+    ? options.regWeeks
+    : defaultRegOffsets.map((off) => ({
+        tue: addDays(calBase, off),
+        wed: addDays(calBase, off + 1),
+        thu: addDays(calBase, off + 2)
+      }));
+  const defaultRplOffsets = [10, 24, 38, 66, 94, 108];
+  const rplWeeks = Array.isArray(options?.rplWeeks) && options.rplWeeks.length >= 6
+    ? options.rplWeeks
+    : defaultRplOffsets.map((off) => ({
+        tue: addDays(calBase, off),
+        wed: addDays(calBase, off + 1),
+        thu: addDays(calBase, off + 2)
+      }));
+
+  const groups = { A: [], B: [], C: [], D: [] };
+  const rplGroups = {};
   const rpl = shuffle(rplTeams || [], Math.random);
   const keys = ["A", "B", "C", "D"];
   rpl.forEach((t, i) => {
@@ -1785,22 +1799,142 @@ function initCup2026(season, rplTeams, fnlTeams, secondLeagueTeams, mediaTeams, 
       logo: t.logo,
       p: 0,
       w: 0,
+      wp: 0,
+      lp: 0,
       d: 0,
       l: 0,
       gf: 0,
       ga: 0,
+      gd: 0,
       pts: 0
     });
   });
+  for (const gid of keys) {
+    const gTeams = groups[gid].map((x) => x.id);
+    rplGroups[gid] = {
+      id: gid,
+      name: `Группа ${gid}`,
+      teams: gTeams,
+      table: groups[gid].map((x, idx) => ({
+        id: x.id,
+        name: x.name,
+        logo: x.logo || "",
+        pos: idx + 1,
+        p: 0,
+        w: 0,
+        wp: 0,
+        lp: 0,
+        d: 0,
+        l: 0,
+        gf: 0,
+        ga: 0,
+        gd: 0,
+        pts: 0,
+        zone: idx < 2 ? "top" : idx === 2 ? "playoff" : "bad",
+        zoneLabel: idx < 2 ? "1/8 Пути РПЛ" : idx === 2 ? "В Путь регионов" : "Вылет из турнира"
+      }))
+    };
+  }
+
+  const fixtures = [];
+  if (!options?.skipFixtures && typeof uidFn === "function") {
+    const groupRoundPairs = [
+      [[0, 1], [2, 3]],
+      [[0, 2], [3, 1]],
+      [[3, 0], [1, 2]],
+      [[1, 0], [3, 2]],
+      [[2, 0], [1, 3]],
+      [[0, 3], [2, 1]]
+    ];
+    for (let rIdx = 0; rIdx < 6; rIdx++) {
+      const dates = rplWeeks[rIdx] || rplWeeks[rplWeeks.length - 1];
+      const roundMatches = [];
+      for (const gid of keys) {
+        const gIds = rplGroups[gid].teams;
+        if (gIds.length < 4) continue;
+        for (const [hi, ai] of groupRoundPairs[rIdx]) {
+          roundMatches.push({ home: gIds[hi], away: gIds[ai], gid });
+        }
+      }
+      const slotSchedule = [
+        { date: dates.tue, time: "17:30" },
+        { date: dates.tue, time: "20:00" },
+        { date: dates.wed, time: "15:00" },
+        { date: dates.wed, time: "17:30" },
+        { date: dates.wed, time: "19:30" },
+        { date: dates.wed, time: "20:45" },
+        { date: dates.thu, time: "17:30" },
+        { date: dates.thu, time: "20:00" }
+      ];
+      roundMatches.forEach((m, slotIdx) => {
+        const sc = slotSchedule[slotIdx] || { date: dates.wed, time: "18:00" };
+        fixtures.push({
+          id: uidFn(),
+          season,
+          comp: "cup",
+          cupPath: "rpl_group",
+          groupId: m.gid,
+          round: rIdx + 1,
+          label: `Путь РПЛ · ${rIdx + 1}-й тур`,
+          date: sc.date,
+          time: sc.time,
+          home: m.home,
+          away: m.away,
+          status: "scheduled",
+          hg: null,
+          ag: null,
+          pos: 0
+        });
+      });
+    }
+
+    const mediaPool = shuffle([...(mediaTeams || [])], Math.random);
+    const lowSecondPool = shuffle(
+      (secondLeagueTeams || []).filter((t) => String(t.comp || "").startsWith("2lb") || t.comp === "2la_silver"),
+      Math.random
+    );
+    const r1PairsCount = Math.min(8, mediaPool.length, lowSecondPool.length);
+    const r1Dates = regWeeks[0];
+    for (let i = 0; i < r1PairsCount; i++) {
+      const mTeam = mediaPool[i];
+      const sTeam = lowSecondPool[i];
+      const slot = i % 3;
+      fixtures.push({
+        id: uidFn(),
+        season,
+        comp: "cup",
+        cupPath: "regions_qual",
+        qualRound: 1,
+        round: 101,
+        label: "Путь регионов · 1-й отборочный раунд",
+        date: slot === 0 ? r1Dates.tue : slot === 1 ? r1Dates.wed : r1Dates.thu,
+        time: ["14:00", "16:30", "18:30", "20:00"][i % 4],
+        home: i % 2 === 0 ? mTeam.id : sTeam.id,
+        away: i % 2 === 0 ? sTeam.id : mTeam.id,
+        status: "scheduled",
+        hg: null,
+        ag: null,
+        pos: 0
+      });
+    }
+  }
+
+  const r1Count = fixtures.filter((f) => f.cupPath === "regions_qual" && f.qualRound === 1).length;
   const cupState = {
     season,
     format: "rpl_and_regions",
     stage: "groups",
+    calBase,
+    rplWeeks,
+    regWeeks,
+    finalVenue: CUP_FINAL_VENUE,
     groups,
+    rplGroups,
     playoffRpl: {},
-    regionsRounds: []
+    regionsQualRounds: r1Count > 0 ? [{ round: 1, label: "Путь регионов · 1-й отборочный раунд", matchesCount: r1Count, completed: false }] : [],
+    regionsRounds: r1Count > 0 ? [{ round: 1, label: "Путь регионов · 1-й отборочный раунд", matchesCount: r1Count, completed: false }] : []
   };
-  return { cupState, fixtures: [] };
+  return { cupState, fixtures };
 }
 function recalculateCupGroups(cupState: any, fixtures: any[]) {
   if (!cupState || !Array.isArray(fixtures)) return;
@@ -2026,8 +2160,202 @@ function recalculateCupGroups(cupState: any, fixtures: any[]) {
     }
   }
 }
-function drawNextRegionsRound(cupState, roundNumber, roundFx, uidFn) {
-  return [];
+function drawNextRegionsRound(cupState: any, roundNumber: number, roundFx: any[] = [], uidFn: () => string = uid, ctx: any = {}) {
+  const nextRound = Number(roundNumber) + 1;
+  if (!cupState || nextRound < 2 || nextRound > 6) return [];
+
+  const allTeams: any[] = Array.isArray(ctx.teams)
+    ? ctx.teams
+    : typeof db !== "undefined" && Array.isArray(db.teams) ? db.teams : [];
+  const teamById = new Map<string, any>();
+  for (const t of allTeams) if (t?.id) teamById.set(t.id, t);
+
+  const seasonFxList: any[] = Array.isArray(ctx.seasonFx)
+    ? ctx.seasonFx
+    : typeof seasonFx === "function" ? seasonFx() : [];
+
+  const alreadyEntered = new Set<string>();
+  for (const f of [...seasonFxList, ...(roundFx || [])]) {
+    if (f && f.comp === "cup" && (f.cupPath === "regions_qual" || (f.qualRound && f.qualRound >= 1 && f.qualRound <= 6))) {
+      if (f.home) alreadyEntered.add(f.home);
+      if (f.away) alreadyEntered.add(f.away);
+    }
+  }
+
+  const resolveWinnerId = (f: any): string | null => {
+    if (!f) return null;
+    if (f.tech?.winner === "home") return f.home;
+    if (f.tech?.winner === "away") return f.away;
+    const hg = Number(f.hg);
+    const ag = Number(f.ag);
+    if (Number.isFinite(hg) && Number.isFinite(ag)) {
+      if (hg > ag) return f.home;
+      if (ag > hg) return f.away;
+    }
+    if (f.pen) {
+      if (f.pen.winner === "home") return f.home;
+      if (f.pen.winner === "away") return f.away;
+      const ph = Number(f.pen.hg);
+      const pa = Number(f.pen.ag);
+      if (Number.isFinite(ph) && Number.isFinite(pa) && ph !== pa) return ph > pa ? f.home : f.away;
+    }
+    return f.home || f.away || null;
+  };
+
+  const winners: string[] = [];
+  const winnerSet = new Set<string>();
+  for (const f of roundFx || []) {
+    const wId = resolveWinnerId(f);
+    if (wId && !winnerSet.has(wId)) {
+      winnerSet.add(wId);
+      winners.push(wId);
+    }
+  }
+  if (!winners.length) return [];
+
+  const unused = allTeams.filter((t) => t?.id && !alreadyEntered.has(t.id) && t.comp !== "rpl");
+  const unusedFnl = shuffle(unused.filter((t) => t.comp === "fnl"), Math.random);
+  const unused2laGold = shuffle(unused.filter((t) => t.comp === "2la_gold"), Math.random);
+  const unused2laSilver = shuffle(unused.filter((t) => t.comp === "2la_silver"), Math.random);
+  const unused2lb = shuffle(unused.filter((t) => String(t.comp || "").startsWith("2lb")), Math.random);
+  const unusedMedia = shuffle(unused.filter((t) => t.comp === "media" || t.comp === "media_div2"), Math.random);
+
+  const entrants: any[] = [];
+  const takeFromPools = (pools: any[][], count: number) => {
+    for (const pool of pools) {
+      while (entrants.length < count && pool.length > 0) {
+        const picked = pool.shift();
+        if (picked && !alreadyEntered.has(picked.id) && !winnerSet.has(picked.id)) {
+          alreadyEntered.add(picked.id);
+          entrants.push(picked);
+        }
+      }
+    }
+  };
+
+  if (nextRound === 2) {
+    // 8 R1 winners + 28 lower-tier clubs = 36 -> 18 R2 winners
+    const targetR4Total = Math.max(16, Math.min(32, unusedFnl.length + 14));
+    const targetR3Winners = Math.max(2, targetR4Total - unusedFnl.length);
+    const targetR3Total = targetR3Winners * 2;
+    const reservedR3 = Math.min(unused2laGold.length, Math.max(0, targetR3Total - 2));
+    const targetR2Winners = Math.max(1, targetR3Total - reservedR3);
+    const targetR2Total = targetR2Winners * 2;
+    const needed = Math.max(winners.length % 2, targetR2Total - winners.length);
+    takeFromPools([unused2lb, unused2laSilver, unusedMedia], needed);
+  } else if (nextRound === 3) {
+    // 18 R2 winners + 10 2LA Gold clubs = 28 -> 14 R3 winners
+    const targetR4Total = Math.max(16, Math.min(32, unusedFnl.length + 14));
+    const targetR3Winners = Math.max(2, targetR4Total - unusedFnl.length);
+    const targetR3Total = targetR3Winners * 2;
+    const needed = Math.max(winners.length % 2, targetR3Total - winners.length);
+    takeFromPools([unused2laGold, unused2laSilver, unused2lb, unusedMedia], needed);
+  } else if (nextRound === 4) {
+    // 14 R3 winners + all 18 FNL clubs = 32 -> 16 R4 winners
+    takeFromPools([unusedFnl], unusedFnl.length);
+    if ((winners.length + entrants.length) % 2 === 1) {
+      takeFromPools([unused2laGold, unused2laSilver, unused2lb, unusedMedia], entrants.length + 1);
+    }
+  } else if (nextRound === 5 || nextRound === 6) {
+    // R5: 16 -> 8 matches -> 8 winners; R6: 8 -> 4 matches -> 4 winners for Spring 1/8 vs RPL 3rd place
+    if (winners.length % 2 === 1) {
+      takeFromPools([unused2laGold, unused2laSilver, unused2lb, unusedFnl, unusedMedia], 1);
+    }
+  }
+
+  let participants = [...winners, ...entrants.map((t) => t.id)];
+  if (participants.length % 2 === 1) participants.pop();
+  if (participants.length < 2) return [];
+
+  // Mix shuffled winners and entrants so fresh entrants pair smoothly with round winners when possible
+  const shufW = shuffle([...winners], Math.random);
+  const shufE = shuffle(entrants.map((t) => t.id), Math.random);
+  const pairs: Array<[string, string]> = [];
+  while (shufW.length > 0 && shufE.length > 0) {
+    pairs.push([shufW.shift()!, shufE.shift()!]);
+  }
+  const leftovers = shuffle([...shufW, ...shufE], Math.random);
+  for (let i = 0; i + 1 < leftovers.length; i += 2) {
+    pairs.push([leftovers[i], leftovers[i + 1]]);
+  }
+
+  const tierRank = (tid: string) => {
+    const c = String(teamById.get(tid)?.comp || "");
+    if (c === "media_div2") return 1;
+    if (c === "media") return 2;
+    if (c.startsWith("2lb")) return 3;
+    if (c === "2la_silver") return 4;
+    if (c === "2la_gold") return 5;
+    if (c === "fnl") return 6;
+    return 7;
+  };
+
+  const regOffsets = [3, 17, 31, 66, 94, 115];
+  const baseDate = cupState.calBase || "2026-07-18";
+  const off = regOffsets[nextRound - 1] ?? (3 + (nextRound - 1) * 21);
+  const regDates = cupState.regWeeks?.[nextRound - 1] || {
+    tue: addDays(baseDate, off),
+    wed: addDays(baseDate, off + 1),
+    thu: addDays(baseDate, off + 2)
+  };
+  const label = `Путь регионов · ${nextRound}-й отборочный раунд`;
+  const targetSeason = cupState.season || ctx.season || (typeof S === "function" ? S() : "2026/27");
+  const times = ["14:00", "16:30", "18:30", "20:00"];
+
+  const newFixtures = pairs.map(([aId, bId], idx) => {
+    const ra = tierRank(aId);
+    const rb = tierRank(bId);
+    let home = aId;
+    let away = bId;
+    if (rb < ra) {
+      home = bId;
+      away = aId;
+    } else if (ra === rb && idx % 2 === 1) {
+      home = bId;
+      away = aId;
+    }
+    const slot = idx % 3;
+    const rawDate = slot === 0 ? regDates.tue : slot === 1 ? regDates.wed : regDates.thu;
+    const resolvedDate = typeof ctx.pickDate === "function" ? ctx.pickDate(rawDate, targetSeason) : rawDate;
+    return {
+      id: typeof uidFn === "function" ? uidFn() : uid(),
+      season: targetSeason,
+      comp: "cup",
+      cupPath: "regions_qual",
+      qualRound: nextRound,
+      round: 100 + nextRound,
+      label,
+      date: resolvedDate,
+      time: times[idx % times.length],
+      home,
+      away,
+      status: "scheduled",
+      hg: null,
+      ag: null,
+      pos: 0
+    };
+  });
+
+  if (!Array.isArray(cupState.regionsQualRounds)) cupState.regionsQualRounds = [];
+  if (!Array.isArray(cupState.regionsRounds)) cupState.regionsRounds = [];
+  const syncRoundMeta = (arr: any[], rNum: number, rLabel: string, count: number, completed: boolean) => {
+    const existing = arr.find((x) => Number(x.round) === rNum);
+    if (existing) {
+      existing.label = rLabel;
+      existing.matchesCount = count;
+      existing.completed = completed;
+    } else {
+      arr.push({ round: rNum, label: rLabel, matchesCount: count, completed });
+    }
+    arr.sort((a, b) => Number(a.round) - Number(b.round));
+  };
+  const prevLabel = `Путь регионов · ${roundNumber}-й отборочный раунд`;
+  syncRoundMeta(cupState.regionsQualRounds, roundNumber, prevLabel, roundFx.length, true);
+  syncRoundMeta(cupState.regionsRounds, roundNumber, prevLabel, roundFx.length, true);
+  syncRoundMeta(cupState.regionsQualRounds, nextRound, label, newFixtures.length, false);
+  syncRoundMeta(cupState.regionsRounds, nextRound, label, newFixtures.length, false);
+
+  return newFixtures;
 }
 
 // src/draw_service.ts
@@ -2783,40 +3111,412 @@ function familyNamesOf(name) {
 
 // src/foreign_transfers.ts
 var FOREIGN_CLUBS = [
-  { id: "besiktas", name: "\u0411\u0435\u0448\u0438\u043A\u0442\u0430\u0448", country: "\u0422\u0443\u0440\u0446\u0438\u044F", league: "\u0421\u0443\u043F\u0435\u0440\u043B\u0438\u0433\u0430", reputation: 78 },
-  { id: "galatasaray", name: "\u0413\u0430\u043B\u0430\u0442\u0430\u0441\u0430\u0440\u0430\u0439", country: "\u0422\u0443\u0440\u0446\u0438\u044F", league: "\u0421\u0443\u043F\u0435\u0440\u043B\u0438\u0433\u0430", reputation: 82 },
-  { id: "fenerbahce", name: "\u0424\u0435\u043D\u0435\u0440\u0431\u0430\u0445\u0447\u0435", country: "\u0422\u0443\u0440\u0446\u0438\u044F", league: "\u0421\u0443\u043F\u0435\u0440\u043B\u0438\u0433\u0430", reputation: 81 },
-  { id: "crvena_zvezda", name: "\u0426\u0440\u0432\u0435\u043D\u0430 \u0417\u0432\u0435\u0437\u0434\u0430", country: "\u0421\u0435\u0440\u0431\u0438\u044F", league: "\u0421\u0443\u043F\u0435\u0440\u043B\u0438\u0433\u0430", reputation: 76 },
-  { id: "partizan", name: "\u041F\u0430\u0440\u0442\u0438\u0437\u0430\u043D", country: "\u0421\u0435\u0440\u0431\u0438\u044F", league: "\u0421\u0443\u043F\u0435\u0440\u043B\u0438\u0433\u0430", reputation: 74 },
-  { id: "paok", name: "\u041F\u0410\u041E\u041A", country: "\u0413\u0440\u0435\u0446\u0438\u044F", league: "\u0421\u0443\u043F\u0435\u0440\u043B\u0438\u0433\u0430", reputation: 77 },
-  { id: "olympiacos", name: "\u041E\u043B\u0438\u043C\u043F\u0438\u0430\u043A\u043E\u0441", country: "\u0413\u0440\u0435\u0446\u0438\u044F", league: "\u0421\u0443\u043F\u0435\u0440\u043B\u0438\u0433\u0430", reputation: 79 }
+  { id: "besiktas", name: "Бешикташ", country: "Турция", flag: "🇹🇷", league: "Суперлига", reputation: 78 },
+  { id: "galatasaray", name: "Галатасарай", country: "Турция", flag: "🇹🇷", league: "Суперлига", reputation: 82 },
+  { id: "fenerbahce", name: "Фенербахче", country: "Турция", flag: "🇹🇷", league: "Суперлига", reputation: 81 },
+  { id: "trabzonspor", name: "Трабзонспор", country: "Турция", flag: "🇹🇷", league: "Суперлига", reputation: 76 },
+  { id: "crvena_zvezda", name: "Црвена Звезда", country: "Сербия", flag: "🇷🇸", league: "Суперлига", reputation: 76 },
+  { id: "partizan", name: "Партизан", country: "Сербия", flag: "🇷🇸", league: "Суперлига", reputation: 74 },
+  { id: "paok", name: "ПАОК", country: "Греция", flag: "🇬🇷", league: "Суперлига", reputation: 77 },
+  { id: "olympiacos", name: "Олимпиакос", country: "Греция", flag: "🇬🇷", league: "Суперлига", reputation: 79 },
+  { id: "aek_athens", name: "АЕК Афины", country: "Греция", flag: "🇬🇷", league: "Суперлига", reputation: 76 },
+  { id: "monaco", name: "Монако", country: "Франция", flag: "🇫🇷", league: "Лига 1", reputation: 84 },
+  { id: "marseille", name: "Марсель", country: "Франция", flag: "🇫🇷", league: "Лига 1", reputation: 83 },
+  { id: "lyon", name: "Лион", country: "Франция", flag: "🇫🇷", league: "Лига 1", reputation: 81 },
+  { id: "lehavre", name: "Гавр", country: "Франция", flag: "🇫🇷", league: "Лига 1", reputation: 73 },
+  { id: "sociedad", name: "Реал Сосьедад", country: "Испания", flag: "🇪🇸", league: "Ла Лига", reputation: 83 },
+  { id: "sevilla", name: "Севилья", country: "Испания", flag: "🇪🇸", league: "Ла Лига", reputation: 80 },
+  { id: "girona", name: "Жирона", country: "Испания", flag: "🇪🇸", league: "Ла Лига", reputation: 78 },
+  { id: "alaves", name: "Алавес", country: "Испания", flag: "🇪🇸", league: "Ла Лига", reputation: 74 },
+  { id: "atalanta", name: "Аталанта", country: "Италия", flag: "🇮🇹", league: "Серия А", reputation: 84 },
+  { id: "fiorentina", name: "Фиорентина", country: "Италия", flag: "🇮🇹", league: "Серия А", reputation: 80 },
+  { id: "torino", name: "Торино", country: "Италия", flag: "🇮🇹", league: "Серия А", reputation: 76 },
+  { id: "wolfsburg", name: "Вольфсбург", country: "Германия", flag: "🇩🇪", league: "Бундеслига", reputation: 78 },
+  { id: "augsburg", name: "Аугсбург", country: "Германия", flag: "🇩🇪", league: "Бундеслига", reputation: 74 },
+  { id: "porto", name: "Порту", country: "Португалия", flag: "🇵🇹", league: "Примейра-лига", reputation: 84 },
+  { id: "braga", name: "Брага", country: "Португалия", flag: "🇵🇹", league: "Примейра-лига", reputation: 79 },
+  { id: "feyenoord", name: "Фейеноорд", country: "Нидерланды", flag: "🇳🇱", league: "Эредивизи", reputation: 81 },
+  { id: "brugge", name: "Брюгге", country: "Бельгия", flag: "🇧🇪", league: "Про-лига", reputation: 79 },
+  { id: "alhilal", name: "Аль-Хиляль", country: "Саудовская Аравия", flag: "🇸🇦", league: "Про-лига", reputation: 83 },
+  { id: "alnasr", name: "Аль-Наср", country: "Саудовская Аравия", flag: "🇸🇦", league: "Про-лига", reputation: 82 }
 ];
-async function checkForeignInterestAfterMatch(db2, match, fixture) {
-  return [];
+function estimateForeignFeeMln(player2: any, offerType: "transfer" | "loan"): number {
+  const ovr = Number(player2?.ovr || player2?.rating || 74);
+  const age = Number(player2?.age || 25);
+  const mvRaw = Number(player2?.marketValue || 0);
+  let baseMln = 0;
+  if (Number.isFinite(mvRaw) && mvRaw > 0) {
+    baseMln = mvRaw >= 1000 ? mvRaw / 1e6 : mvRaw;
+  } else {
+    if (ovr >= 82) baseMln = 14 + (ovr - 82) * 3.5;
+    else if (ovr >= 78) baseMln = 6.5 + (ovr - 78) * 1.9;
+    else if (ovr >= 74) baseMln = 2.4 + (ovr - 74) * 1.0;
+    else if (ovr >= 70) baseMln = 1.0 + (ovr - 70) * 0.35;
+    else baseMln = 0.5 + Math.max(0, ovr - 65) * 0.1;
+  }
+  const ageMult = age <= 21 ? 1.28 : age <= 24 ? 1.15 : age <= 28 ? 1.0 : age <= 31 ? 0.8 : 0.6;
+  const randomSpread = 1.04 + Math.random() * 0.24;
+  let feeMln = baseMln * ageMult * randomSpread;
+  if (offerType === "loan") {
+    feeMln = Math.max(0.3, Math.min(2.5, feeMln * 0.18));
+  } else {
+    feeMln = Math.max(0.5, Math.min(35, feeMln));
+  }
+  return Math.round(feeMln * 10) / 10;
 }
-function respondToForeignOffer(db2, offerId, action, tid, comment) {
-  return { ok: true, status: action };
+function pickMatchingForeignClub(player2: any, preferredName?: string) {
+  if (preferredName) {
+    const found = FOREIGN_CLUBS.find((c) => c.name.toLowerCase() === String(preferredName).trim().toLowerCase());
+    if (found) return found;
+  }
+  const ovr = Number(player2?.ovr || player2?.rating || 74);
+  let pool = FOREIGN_CLUBS;
+  if (ovr >= 80) pool = FOREIGN_CLUBS.filter((c) => c.reputation >= 80);
+  else if (ovr >= 75) pool = FOREIGN_CLUBS.filter((c) => c.reputation >= 76 && c.reputation <= 83);
+  else pool = FOREIGN_CLUBS.filter((c) => c.reputation <= 78);
+  if (!pool.length) pool = FOREIGN_CLUBS;
+  return pool[Math.floor(Math.random() * pool.length)];
 }
-async function createForeignOfferWithAI(options) {
-  const buyer = FOREIGN_CLUBS[Math.floor(Math.random() * FOREIGN_CLUBS.length)];
+async function createForeignOfferWithAI(options: { player: any; club: any; performanceReason?: string; triggerReason?: string; preferLoan?: boolean }) {
   const player2 = options.player;
   const club = options.club;
-  const feeNum = (player2?.marketValue || 1e6) * (1.1 + Math.random() * 0.4);
-  const feeStr = `${(feeNum / 1e6).toFixed(1)} \u043C\u043B\u043D \u20AC`;
+  const ovr = Number(player2?.ovr || player2?.rating || 74);
+  const age = Number(player2?.age || 25);
+  let offerType: "transfer" | "loan" = options.preferLoan || (age <= 22 && ovr < 77 && Math.random() < 0.35) || Math.random() < 0.18 ? "loan" : "transfer";
+  let buyer = pickMatchingForeignClub(player2);
+  let feeAmount = estimateForeignFeeMln(player2, offerType);
+  let wage = `€${Math.round(clamp(feeAmount * 7.5 + (ovr - 65) * 1.4, 10, 140))} тыс./нед.`;
+  let triggerReason = options.triggerReason || options.performanceReason || `Уверенная игра и высокий рейтинг (${ovr}) в составе «${club?.name || "клуба"}»`;
+  let scoutReport = options.performanceReason || `Международные скауты клуба «${buyer.name}» высоко оценили игру ${player2?.name || "футболиста"} (${player2?.pos || "ЦП"}, рейтинг ${ovr}) и видят в нём готовое усиление состава.`;
+
+  if (typeof hasLLM === "function" && hasLLM() && typeof llmJSON === "function") {
+    try {
+      const clubList = FOREIGN_CLUBS.map((c) => `${c.name} (${c.country}, ${c.league}, рейтинг ${c.reputation})`).join("; ");
+      const sys = "Ты — международный футбольный скаут. Сгенерируй реалистичное зарубежное трансферное предложение для игрока российского клуба. Отвечай строго в JSON.";
+      const prompt = `Игрок: ${player2?.name || "Игрок"}, позиция: ${player2?.pos || "ЦП"}, возраст: ${age}, рейтинг: ${ovr}, клуб: «${club?.name || "Клуб"}».
+Повод интереса: ${triggerReason}.
+Базовый расчёт цены: €${feeAmount}M (${offerType === "loan" ? "аренда" : "полноценный выкуп"}).
+Выбери подходящий зарубежный клуб из списка (или сопоставимый): ${clubList}.
+Верни JSON строго в формате:
+{
+  "buyerClub": "Название клуба",
+  "type": "transfer" или "loan",
+  "feeAmount": число_в_миллионах_евро (реалистично от 0.4 до 30.0),
+  "wage": "€XX тыс./нед.",
+  "triggerReason": "короткий конкретный повод (1 фраза)",
+  "scoutReport": "краткий профессиональный отчёт скаута (1-2 предложения на русском)"
+}`;
+      const aiRes = await llmJSON(sys, prompt, { task: "foreign-scout-offer", temp: 0.45, max: 600 });
+      if (aiRes && typeof aiRes === "object") {
+        if (aiRes.buyerClub) {
+          const matched = pickMatchingForeignClub(player2, aiRes.buyerClub);
+          buyer = matched.name.toLowerCase() === String(aiRes.buyerClub).trim().toLowerCase()
+            ? matched
+            : { ...matched, name: String(aiRes.buyerClub).trim().slice(0, 60) };
+        }
+        if (aiRes.type === "loan" || aiRes.type === "transfer") offerType = aiRes.type;
+        const aiFee = Number(aiRes.feeAmount);
+        if (Number.isFinite(aiFee) && aiFee >= 0.2 && aiFee <= 50) {
+          feeAmount = Math.round(aiFee * 10) / 10;
+        }
+        if (aiRes.wage && typeof aiRes.wage === "string") wage = aiRes.wage.slice(0, 40);
+        if (aiRes.triggerReason && typeof aiRes.triggerReason === "string") triggerReason = aiRes.triggerReason.slice(0, 180);
+        if (aiRes.scoutReport && typeof aiRes.scoutReport === "string") scoutReport = aiRes.scoutReport.slice(0, 350);
+      }
+    } catch (err) {
+      console.error("createForeignOfferWithAI fallback:", err?.message || err);
+    }
+  }
+
+  const feeNum = Math.round(feeAmount * 1e6);
+  const feeStr = formatFeeDisplay(feeAmount);
   return {
-    id: `fo_${Date.now()}_${Math.floor(Math.random() * 1e3)}`,
+    id: `fo_${Date.now()}_${Math.floor(Math.random() * 1e4)}`,
+    pid: player2?.id,
     playerId: player2?.id,
-    playerName: player2?.name,
+    playerName: player2?.name || "Игрок",
+    pos: player2?.pos || "ЦП",
     clubId: club?.id,
-    clubName: club?.name,
+    clubName: club?.name || "",
     buyerClub: buyer.name,
     buyerCountry: buyer.country,
+    buyerLeague: buyer.league,
+    buyerFlag: buyer.flag || "🌍",
+    buyerLogo: "",
+    type: offerType,
     fee: feeStr,
+    feeAmount,
     feeNum,
-    scoutReport: options.performanceReason || `\u0412\u044B\u0441\u043E\u043A\u0438\u0439 \u043A\u043B\u0430\u0441\u0441 \u0438\u0433\u0440\u044B \u0438 \u0441\u0442\u0430\u0431\u0438\u043B\u044C\u043D\u043E\u0435 \u043B\u0438\u0434\u0435\u0440\u0441\u0442\u0432\u043E \u0432 \u0441\u043E\u0441\u0442\u0430\u0432\u0435 \xAB${club?.name}\xBB.`,
+    wage,
+    triggerReason,
+    scoutReport,
     status: "pending",
     date: (/* @__PURE__ */ new Date()).toISOString()
   };
+}
+async function checkForeignInterestAfterMatch(db2: any, match: any, fixture: any) {
+  if (!db2 || !match || !fixture || fixture.comp === "friendly") return [];
+  if (!Array.isArray(db2.foreignOffers)) db2.foreignOffers = [];
+  if (!Array.isArray(db2.transfers)) db2.transfers = [];
+
+  const hName = typeof tn === "function" ? tn(fixture.home) : fixture.home;
+  const aName = typeof tn === "function" ? tn(fixture.away) : fixture.away;
+  const ratings = Array.isArray(match.ratings) && match.ratings.length
+    ? match.ratings
+    : typeof computeMatchRatings === "function"
+      ? computeMatchRatings(match, fixture, hName, aName)
+      : [];
+  if (!ratings.length) return [];
+
+  const motmId = match.motm?.playerId || match.motm?.id || null;
+  const now = Date.now();
+  const recentRejectedCutoff = now - 7 * 864e5;
+  const scoreText = `${hName} ${fixture.hg ?? 0}:${fixture.ag ?? 0} ${aName}`;
+
+  const candidates = [];
+  for (const r of ratings) {
+    const pid = r.playerId || r.id;
+    if (!pid) continue;
+    const pObj = (db2.players || []).find((x: any) => x.id === pid);
+    if (!pObj || (pObj.teamId !== fixture.home && pObj.teamId !== fixture.away)) continue;
+    const clubObj = (db2.teams || []).find((x: any) => x.id === pObj.teamId);
+    if (!clubObj) continue;
+    // Focus foreign scouts mainly on RPL, FNL, and Cup matches
+    if (!["rpl", "fnl", "cup", "supercup"].includes(fixture.comp) && !["rpl", "fnl"].includes(clubObj.comp)) continue;
+
+    // Skip if player already has a pending foreign offer or was rejected recently
+    const hasPending = db2.foreignOffers.some((o: any) => (o.pid === pid || o.playerId === pid) && o.status === "pending");
+    if (hasPending) continue;
+    const clubPendingCount = db2.foreignOffers.filter((o: any) => o.clubId === clubObj.id && o.status === "pending").length;
+    if (clubPendingCount >= 2) continue;
+    const recentlyRejected = db2.foreignOffers.some((o: any) =>
+      (o.pid === pid || o.playerId === pid) && o.status === "rejected" && new Date(o.respondedAt || o.date || 0).getTime() > recentRejectedCutoff
+    );
+    if (recentlyRejected) continue;
+
+    const mRating = Number(r.rating || 6.5);
+    const goals = Number(r.goals || 0);
+    const assists = Number(r.assists || 0);
+    const saves = Number(r.saves || 0);
+    const cs = Number(r.cs || 0);
+    const isMotm = motmId === pid;
+    const baseOvr = Number(pObj.ovr || pObj.rating || 70);
+    const age = Number(pObj.age || 25);
+
+    const standout = isMotm || mRating >= 7.7 || goals + assists >= 2 || (saves >= 5 && cs > 0) || (baseOvr >= 78 && mRating >= 7.3) || (age <= 22 && baseOvr >= 72 && mRating >= 7.3);
+    if (!standout) continue;
+
+    let priority = mRating * 10 + goals * 8 + assists * 5 + (isMotm ? 10 : 0) + Math.max(0, baseOvr - 70);
+    if (age <= 23) priority += 5;
+    candidates.push({ r, pObj, clubObj, priority, isMotm, mRating, goals, assists, saves, cs });
+  }
+
+  if (!candidates.length) return [];
+  candidates.sort((a, b) => b.priority - a.priority);
+  const best = candidates[0];
+
+  // Organic probability check: higher chance for truly exceptional performances, avoid flooding every match
+  const prob = best.isMotm || best.mRating >= 8.3 || best.goals + best.assists >= 2 ? 0.35 : 0.2;
+  if (Math.random() > prob) return [];
+
+  const reasons: string[] = [];
+  if (best.isMotm) reasons.push("лучший игрок матча (MOTM)");
+  if (best.goals > 0) reasons.push(`${best.goals} ${ruPlural(best.goals, "гол", "гола", "голов")}`);
+  if (best.assists > 0) reasons.push(`${best.assists} ${ruPlural(best.assists, "ассист", "ассиста", "ассистов")}`);
+  if (best.saves >= 4) reasons.push(`${best.saves} сейвов${best.cs ? " и сухой матч" : ""}`);
+  reasons.push(`оценка ${best.mRating.toFixed(1)}`);
+
+  const triggerReason = `${reasons.join(", ")} в матче ${scoreText}`;
+  const offer = await createForeignOfferWithAI({
+    player: best.pObj,
+    club: best.clubObj,
+    triggerReason,
+    performanceReason: `Скауты впечатлены выступлением ${best.pObj.name} (${triggerReason}).`
+  });
+
+  db2.foreignOffers.push(offer);
+  db2.transfers.push({
+    id: "tr_" + offer.id,
+    pid: offer.pid,
+    playerName: offer.playerName,
+    pos: offer.pos,
+    from: best.clubObj.id,
+    fromName: best.clubObj.name,
+    to: null,
+    toName: offer.buyerClub,
+    isForeign: true,
+    buyerCountry: offer.buyerCountry,
+    buyerFlag: offer.buyerFlag,
+    type: offer.type,
+    fee: offer.fee,
+    feeAmount: offer.feeAmount,
+    date: offer.date.slice(0, 10),
+    status: "pending",
+    clubApproval: "pending",
+    adminApproval: "approved",
+    note: offer.scoutReport,
+    foreignOfferId: offer.id
+  });
+  return [offer];
+}
+function respondToForeignOffer(db2: any, offerId: string, action: string, tid?: string, comment?: string) {
+  if (!db2 || !Array.isArray(db2.foreignOffers)) {
+    throw new Error("База зарубежных предложений недоступна");
+  }
+  const offer = db2.foreignOffers.find((o: any) => o.id === offerId);
+  if (!offer) throw new Error("Зарубежное предложение не найдено");
+  if (tid && offer.clubId && offer.clubId !== tid) {
+    throw new Error("Предложение адресовано другому клубу");
+  }
+  if (offer.status !== "pending") {
+    throw new Error("По этому предложению уже принято решение");
+  }
+  if (action !== "accept" && action !== "reject") {
+    throw new Error("Неизвестное действие по зарубежному предложению");
+  }
+
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  if (!Array.isArray(db2.transfers)) db2.transfers = [];
+  const linkedTransfer = db2.transfers.find((t: any) => t.foreignOfferId === offer.id || t.id === "tr_" + offer.id);
+
+  if (action === "reject") {
+    offer.status = "rejected";
+    offer.respondedAt = nowIso;
+    if (comment) offer.comment = String(comment).slice(0, 300);
+    if (linkedTransfer) {
+      linkedTransfer.status = "rejected";
+      linkedTransfer.clubApproval = "rejected";
+      linkedTransfer.rejectedAt = nowIso;
+      if (comment) linkedTransfer.rejectReason = String(comment).slice(0, 300);
+    }
+    return { ok: true, status: "rejected", offer };
+  }
+
+  const pid = offer.pid || offer.playerId;
+  const p = (db2.players || []).find((x: any) => x.id === pid);
+  const seller = (db2.teams || []).find((x: any) => x.id === offer.clubId);
+  if (!p) throw new Error("Игрок не найден в базе");
+  if (!seller) throw new Error("Клуб-продавец не найден");
+  if (p.teamId !== seller.id) {
+    throw new Error(`Игрок ${p.name} уже не числится в составе «${seller.name}»`);
+  }
+
+  const feeAmt = offer.feeAmount !== void 0 && offer.feeAmount !== null && Number.isFinite(Number(offer.feeAmount))
+    ? Number(offer.feeAmount)
+    : offer.feeNum && Number(offer.feeNum) >= 1000
+      ? Number(offer.feeNum) / 1e6
+      : parseFeeAmount(offer.fee);
+  const feeEuros = Math.round(Math.max(0, feeAmt) * 1e6);
+
+  if (typeof removePlayerFromClubUsage === "function") {
+    removePlayerFromClubUsage(seller.id, p.id);
+  }
+  if (offer.type === "loan") {
+    p.loanFromId = seller.id;
+    p.loanFromName = seller.name;
+    p.loanIsForeign = true;
+    p.teamId = null;
+    p.abroadClub = offer.buyerClub;
+    p.abroadCountry = offer.buyerCountry;
+  } else {
+    p.teamId = null;
+    p.formerClub = seller.name;
+    p.abroadClub = offer.buyerClub;
+    p.abroadCountry = offer.buyerCountry;
+    delete p.loanFromId;
+    delete p.loanFromName;
+    delete p.loanIsForeign;
+  }
+
+  let sellOnPayout = 0;
+  let sellOnClubObj = null;
+  if (feeEuros > 0 && p.sellOnPercent && Number(p.sellOnPercent) > 0 && p.sellOnClubId && p.sellOnClubId !== seller.id) {
+    sellOnClubObj = (db2.teams || []).find((x: any) => x.id === p.sellOnClubId) || null;
+    if (sellOnClubObj) {
+      sellOnPayout = Math.round(feeEuros * (Number(p.sellOnPercent) / 100));
+    }
+  }
+  const netSellerIncome = Math.max(0, feeEuros - sellOnPayout);
+
+  if (!Array.isArray(db2.budgetHistory)) db2.budgetHistory = [];
+  if (netSellerIncome > 0) {
+    const prevBudget = seller.budget || 0;
+    seller.budget = prevBudget + netSellerIncome;
+    db2.budgetHistory.push({
+      id: typeof uid === "function" ? uid() : `bh_${Date.now()}`,
+      teamId: seller.id,
+      teamName: seller.name,
+      amount: netSellerIncome,
+      prevBudget,
+      newBudget: seller.budget,
+      type: offer.type === "loan" ? "foreign_loan" : "foreign_sale",
+      typeLabel: offer.type === "loan" ? "Аренда за рубеж" : "Трансфер за рубеж",
+      description: `${offer.type === "loan" ? "Аренда" : "Продажа"} за рубеж: ${p.name} в «${offer.buyerClub}» (${offer.buyerCountry}) (+€${netSellerIncome.toLocaleString("ru-RU")}${sellOnPayout > 0 && sellOnClubObj ? `, sell-on ${p.sellOnPercent}% в «${sellOnClubObj.name}»: -€${sellOnPayout.toLocaleString("ru-RU")}` : ""})`,
+      date: nowIso,
+      byAdmin: false
+    });
+  }
+  if (sellOnPayout > 0 && sellOnClubObj) {
+    const prevSoc = sellOnClubObj.budget || 0;
+    sellOnClubObj.budget = prevSoc + sellOnPayout;
+    db2.budgetHistory.push({
+      id: typeof uid === "function" ? uid() : `bh_so_${Date.now()}`,
+      teamId: sellOnClubObj.id,
+      teamName: sellOnClubObj.name,
+      amount: sellOnPayout,
+      prevBudget: prevSoc,
+      newBudget: sellOnClubObj.budget,
+      type: "sell_on_clause",
+      typeLabel: "Выплата по Sell-on clause",
+      description: `Пункт о перепродаже (${p.sellOnPercent}%): продажа ${p.name} из «${seller.name}» в «${offer.buyerClub}» (+€${sellOnPayout.toLocaleString("ru-RU")})`,
+      date: nowIso,
+      byAdmin: false
+    });
+  }
+
+  offer.status = "accepted";
+  offer.respondedAt = nowIso;
+  offer.feeAmount = feeAmt;
+  if (comment) offer.comment = String(comment).slice(0, 300);
+
+  if (linkedTransfer) {
+    linkedTransfer.status = "approved";
+    linkedTransfer.clubApproval = "approved";
+    linkedTransfer.adminApproval = "approved";
+    linkedTransfer.executedAt = nowIso;
+    linkedTransfer.fee = offer.fee;
+    linkedTransfer.feeAmount = feeAmt;
+  } else {
+    db2.transfers.push({
+      id: "tr_" + offer.id,
+      pid: p.id,
+      playerName: p.name,
+      pos: p.pos || offer.pos || "ЦП",
+      from: seller.id,
+      fromName: seller.name,
+      to: null,
+      toName: offer.buyerClub,
+      isForeign: true,
+      buyerCountry: offer.buyerCountry,
+      buyerFlag: offer.buyerFlag || "🌍",
+      type: offer.type || "transfer",
+      fee: offer.fee,
+      feeAmount: feeAmt,
+      date: nowIso.slice(0, 10),
+      status: "approved",
+      clubApproval: "approved",
+      adminApproval: "approved",
+      executedAt: nowIso,
+      note: offer.scoutReport,
+      foreignOfferId: offer.id
+    });
+  }
+
+  if (typeof tg === "function") {
+    tg(`✈️ <b>Трансфер за рубеж оформлен!</b>\n${esc(p.name)} покидает «${esc(seller.name)}» и переходит в «${esc(offer.buyerClub)}» (${esc(offer.buyerCountry)}) (${offer.type === "loan" ? "аренда" : "выкуп"} за <b>${esc(offer.fee)}</b>).`);
+  }
+
+  return { ok: true, status: "accepted", offer, netIncome: netSellerIncome, newBudget: seller.budget };
 }
 
 // src/insider_feed.ts
@@ -9482,107 +10182,131 @@ function advanceCup() {
     const roundFx = seasonFx().filter((f) => f.comp === "cup" && f.cupPath === "regions_qual" && f.qualRound === r);
     const nextFx = seasonFx().filter((f) => f.comp === "cup" && f.cupPath === "regions_qual" && f.qualRound === r + 1);
     if (roundFx.length > 0 && roundFx.every((f) => f.status === "done") && nextFx.length === 0) {
-      const newFixtures = drawNextRegionsRound(db.cupState2026, r, roundFx, uid);
-      newFixtures.forEach((f) => assignReferee(f));
-      db.fixtures.push(...newFixtures);
-      save();
+      const newFixtures = drawNextRegionsRound(db.cupState2026, r, roundFx, uid, {
+        teams: db.teams,
+        seasonFx: seasonFx(),
+        season: S(),
+        pickDate: pickNonRplGameDate
+      });
+      if (newFixtures.length > 0) {
+        newFixtures.forEach((f) => assignReferee(f));
+        db.fixtures.push(...newFixtures);
+        ensureDualTimes(S(), false);
+        save();
+      }
     }
   }
   const r6Fx = seasonFx().filter((f) => f.comp === "cup" && f.cupPath === "regions_qual" && f.qualRound === 6);
   if (r6Fx.length > 0 && r6Fx.every((f) => f.status === "done")) {
     const r6Info = db.cupState2026.regionsQualRounds?.find((qr) => qr.round === 6);
     if (r6Info) r6Info.completed = true;
+    const r6Meta = db.cupState2026.regionsRounds?.find((qr) => qr.round === 6);
+    if (r6Meta) r6Meta.completed = true;
   }
   const rplGroupFx = seasonFx().filter((f) => f.comp === "cup" && f.cupPath === "rpl_group");
   const allGroupsDone = rplGroupFx.length >= 48 && rplGroupFx.every((f) => f.status === "done");
   const existingR16 = seasonFx().filter((f) => f.comp === "cup" && f.cupStage === "rpl_playoff_r16");
-  if (allGroupsDone && !existingR16.length && db.cupState2026.rplGroups?.["A"]?.table?.length >= 3 && db.cupState2026.rplGroups?.["B"]?.table?.length >= 3 && db.cupState2026.rplGroups?.["C"]?.table?.length >= 3 && db.cupState2026.rplGroups?.["D"]?.table?.length >= 3) {
+  const existingRegR16 = seasonFx().filter((f) => f.comp === "cup" && f.cupStage === "regions_r16");
+  const hasGroupTables = db.cupState2026.rplGroups?.["A"]?.table?.length >= 3 && db.cupState2026.rplGroups?.["B"]?.table?.length >= 3 && db.cupState2026.rplGroups?.["C"]?.table?.length >= 3 && db.cupState2026.rplGroups?.["D"]?.table?.length >= 3;
+  if (allGroupsDone && hasGroupTables) {
     db.cupState2026.stage = "playoff_spring";
     const tA = db.cupState2026.rplGroups["A"].table;
     const tB = db.cupState2026.rplGroups["B"].table;
     const tC = db.cupState2026.rplGroups["C"].table;
     const tD = db.cupState2026.rplGroups["D"].table;
-    const ties = [
-      { a: tA[0].id, b: tB[1].id, name: "1/8 \u0444\u0438\u043D\u0430\u043B\u0430 \u041F\u0443\u0442\u0438 \u0420\u041F\u041B \xB7 \u041F\u0430\u0440\u0430 1" },
-      { a: tB[0].id, b: tA[1].id, name: "1/8 \u0444\u0438\u043D\u0430\u043B\u0430 \u041F\u0443\u0442\u0438 \u0420\u041F\u041B \xB7 \u041F\u0430\u0440\u0430 2" },
-      { a: tC[0].id, b: tD[1].id, name: "1/8 \u0444\u0438\u043D\u0430\u043B\u0430 \u041F\u0443\u0442\u0438 \u0420\u041F\u041B \xB7 \u041F\u0430\u0440\u0430 3" },
-      { a: tD[0].id, b: tC[1].id, name: "1/8 \u0444\u0438\u043D\u0430\u043B\u0430 \u041F\u0443\u0442\u0438 \u0420\u041F\u041B \xB7 \u041F\u0430\u0440\u0430 4" }
-    ];
-    ties.forEach((tie, idx) => {
-      const leg1Date = pickNonRplGameDate(ko(228), S());
-      const fx1 = {
-        id: uid(),
-        season: S(),
-        comp: "cup",
-        cupPath: "rpl_playoff",
-        cupStage: "rpl_playoff_r16",
-        tieId: `r16_${idx + 1}`,
-        leg: 1,
-        round: 201,
-        label: `${tie.name} (1-\u0439 \u043C\u0430\u0442\u0447)`,
-        date: leg1Date,
-        time: idx % 2 === 0 ? "18:00" : "20:30",
-        home: tie.b,
-        away: tie.a,
-        status: "scheduled",
-        hg: null,
-        ag: null,
-        pos: 0
-      };
-      assignReferee(fx1);
-      db.fixtures.push(fx1);
-      const leg2Date = pickNonRplGameDate(ko(242), S());
-      const fx2 = {
-        id: uid(),
-        season: S(),
-        comp: "cup",
-        cupPath: "rpl_playoff",
-        cupStage: "rpl_playoff_r16",
-        tieId: `r16_${idx + 1}`,
-        leg: 2,
-        round: 202,
-        label: `${tie.name} (\u041E\u0442\u0432\u0435\u0442\u043D\u044B\u0439 \u043C\u0430\u0442\u0447)`,
-        date: leg2Date,
-        time: idx % 2 === 0 ? "18:00" : "20:30",
-        home: tie.a,
-        away: tie.b,
-        status: "scheduled",
-        hg: null,
-        ag: null,
-        pos: 0
-      };
-      assignReferee(fx2);
-      db.fixtures.push(fx2);
-    });
-    const thirdPlaces = [tA[2].id, tB[2].id, tC[2].id, tD[2].id];
+    if (!existingR16.length) {
+      const ties = [
+        { a: tA[0].id, b: tB[1].id, name: "1/8 финала Пути РПЛ · Пара 1" },
+        { a: tB[0].id, b: tA[1].id, name: "1/8 финала Пути РПЛ · Пара 2" },
+        { a: tC[0].id, b: tD[1].id, name: "1/8 финала Пути РПЛ · Пара 3" },
+        { a: tD[0].id, b: tC[1].id, name: "1/8 финала Пути РПЛ · Пара 4" }
+      ];
+      ties.forEach((tie, idx) => {
+        const leg1Date = pickNonRplGameDate(ko(228), S());
+        const fx1 = {
+          id: uid(),
+          season: S(),
+          comp: "cup",
+          cupPath: "rpl_playoff",
+          cupStage: "rpl_playoff_r16",
+          tieId: `r16_${idx + 1}`,
+          leg: 1,
+          round: 201,
+          label: `${tie.name} (1-й матч)`,
+          date: leg1Date,
+          time: idx % 2 === 0 ? "18:00" : "20:30",
+          home: tie.b,
+          away: tie.a,
+          status: "scheduled",
+          hg: null,
+          ag: null,
+          pos: 0
+        };
+        assignReferee(fx1);
+        db.fixtures.push(fx1);
+        const leg2Date = pickNonRplGameDate(ko(242), S());
+        const fx2 = {
+          id: uid(),
+          season: S(),
+          comp: "cup",
+          cupPath: "rpl_playoff",
+          cupStage: "rpl_playoff_r16",
+          tieId: `r16_${idx + 1}`,
+          leg: 2,
+          round: 202,
+          label: `${tie.name} (Ответный матч)`,
+          date: leg2Date,
+          time: idx % 2 === 0 ? "18:00" : "20:30",
+          home: tie.a,
+          away: tie.b,
+          status: "scheduled",
+          hg: null,
+          ag: null,
+          pos: 0
+        };
+        assignReferee(fx2);
+        db.fixtures.push(fx2);
+      });
+      ensureDualTimes(S(), false);
+      save();
+    }
+    const hasRegionsQualFx = seasonFx().some((f) => f.comp === "cup" && f.cupPath === "regions_qual");
     const r6FxDone = seasonFx().filter((f) => f.comp === "cup" && f.qualRound === 6 && f.status === "done");
-    const r6Winners = r6FxDone.map(winnerOf);
-    const regOpponents = r6Winners.length >= 4 ? r6Winners.slice(0, 4) : [...db.teams.filter((t) => t.comp === "fnl" || t.comp === "media")].slice(0, 4).map((t) => t.id);
-    thirdPlaces.forEach((rplTid, idx) => {
-      const regTid = regOpponents[idx % regOpponents.length];
-      const fx2 = {
-        id: uid(),
-        season: S(),
-        comp: "cup",
-        cupPath: "regions_playoff",
-        cupStage: "regions_r16",
-        round: 301,
-        label: "\u041F\u0443\u0442\u044C \u0440\u0435\u0433\u0438\u043E\u043D\u043E\u0432 \xB7 1/8 \u0444\u0438\u043D\u0430\u043B\u0430 (\u043D\u0430 \u0432\u044B\u043B\u0435\u0442)",
-        date: ko(235),
-        time: idx % 2 === 0 ? "17:00" : "19:30",
-        home: regTid,
-        // Хозяин — клуб не из РПЛ!
-        away: rplTid,
-        status: "scheduled",
-        hg: null,
-        ag: null,
-        pos: 0
-      };
-      assignReferee(fx2);
-      db.fixtures.push(fx2);
-    });
-    ensureDualTimes(S(), false);
-    save();
+    const r6Winners = r6FxDone.map(winnerOf).filter(Boolean);
+    const regionsReady = !hasRegionsQualFx || (r6Fx.length > 0 && r6Fx.every((f) => f.status === "done") && r6Winners.length >= 2);
+    if (!existingRegR16.length && regionsReady) {
+      const thirdPlaces = [tA[2].id, tB[2].id, tC[2].id, tD[2].id];
+      const regOpponents = r6Winners.length >= 4
+        ? r6Winners.slice(0, 4)
+        : r6Winners.length > 0
+          ? r6Winners
+          : [...db.teams.filter((t) => t.comp === "fnl" || t.comp === "media")].slice(0, 4).map((t) => t.id);
+      thirdPlaces.forEach((rplTid, idx) => {
+        const regTid = regOpponents[idx % regOpponents.length];
+        const fx2 = {
+          id: uid(),
+          season: S(),
+          comp: "cup",
+          cupPath: "regions_playoff",
+          cupStage: "regions_r16",
+          round: 301,
+          label: "Путь регионов · 1/8 финала (на вылет)",
+          date: pickNonRplGameDate(ko(235), S()),
+          time: idx % 2 === 0 ? "17:00" : "19:30",
+          home: regTid,
+          // Хозяин — клуб не из РПЛ!
+          away: rplTid,
+          status: "scheduled",
+          hg: null,
+          ag: null,
+          pos: 0
+        };
+        assignReferee(fx2);
+        db.fixtures.push(fx2);
+      });
+      ensureDualTimes(S(), false);
+      save();
+    }
   }
   const existingQF = seasonFx().filter((f) => f.comp === "cup" && f.cupStage === "rpl_playoff_qf");
   const r16Done = existingR16.length >= 8 && existingR16.every((f) => f.status === "done");
@@ -13411,7 +14135,7 @@ app.get("/api/club", needClub, (req, res) => {
     legionSquadCount,
     squadSubmitted: !!(db.settings.squadSubmissions?.[req.tid]?.season === S() && Array.isArray(db.squads[req.tid])),
     registrationWindow,
-    freeAgentsCount: (db.players || []).filter((p) => !p.teamId).length,
+    freeAgentsCount: (db.players || []).filter((p) => !p.teamId && !p.abroadClub).length,
     staffSlots: staffSlots(req.tid),
     staffOffers: staffOffersFor(req.tid),
     family: sisterIdsOf(req.tid).map((id) => ({ id, name: tn(id), logo: teamLogo(id), comp: team(id)?.comp })),
@@ -13420,7 +14144,7 @@ app.get("/api/club", needClub, (req, res) => {
     squad: sq.map(mapClubPlayer),
     loanedOut: (db.players || []).filter((p) => p.loanFromId === req.tid && p.teamId !== req.tid).map((p) => ({
       ...pubPlayer(p),
-      loanedTo: p.teamId ? tn(p.teamId) : null,
+      loanedTo: p.abroadClub ? `${p.abroadClub} (${p.abroadCountry || "за рубеж"})` : (p.teamId ? tn(p.teamId) : null),
       loanedToId: p.teamId || null
     })),
     tactic: db.tactics[req.tid] || null,
@@ -13763,16 +14487,19 @@ app.post("/api/club/foreign-offer/respond", needClub, (req, res) => {
 });
 app.post("/api/club/scout-request", admin, needClub, async (req, res) => {
   const t = team(req.tid);
-  if (!t) return fail(res, "\u041A\u043B\u0443\u0431 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D");
+  if (!t) return fail(res, "Клуб не найден");
   const sq = squadOf(req.tid);
-  if (!sq.length) return fail(res, "\u0412 \u0441\u043E\u0441\u0442\u0430\u0432\u0435 \u043A\u043B\u0443\u0431\u0430 \u043D\u0435\u0442 \u0438\u0433\u0440\u043E\u043A\u043E\u0432 \u0434\u043B\u044F \u0441\u043A\u0430\u0443\u0442\u0438\u043D\u0433\u0430");
-  const sorted = [...sq].sort((a, b) => (b.rating || 70) - (a.rating || 70));
-  const candidate = sorted[0];
+  if (!sq.length) return fail(res, "В составе клуба нет игроков для скаутинга");
+  const sorted = [...sq].sort((a, b) => (b.ovr || b.rating || 70) - (a.ovr || a.rating || 70));
+  const pendingPids = new Set((db.foreignOffers || []).filter((o) => o.status === "pending").map((o) => o.pid || o.playerId));
+  const requestedPlayer = req.body?.playerId ? sorted.find((p) => p.id === req.body.playerId) : null;
+  const candidate = requestedPlayer || sorted.find((p) => !pendingPids.has(p.id)) || sorted[0];
   try {
     const offer = await createForeignOfferWithAI({
       player: candidate,
       club: t,
-      performanceReason: req.body.reason || `\u0412\u044B\u0441\u043E\u043A\u0438\u0439 \u043A\u043B\u0430\u0441\u0441 \u0438\u0433\u0440\u044B \u0438 \u0441\u0442\u0430\u0431\u0438\u043B\u044C\u043D\u043E\u0435 \u043B\u0438\u0434\u0435\u0440\u0441\u0442\u0432\u043E \u0432 \u0441\u043E\u0441\u0442\u0430\u0432\u0435 \xAB${t.name}\xBB (\u0440\u0435\u0439\u0442\u0438\u043D\u0433 ${candidate.rating || 75})`
+      triggerReason: req.body?.reason || `Стабильное лидерство в «${t.name}» (рейтинг ${candidate.ovr || candidate.rating || 75})`,
+      performanceReason: req.body?.reason || `Высокий класс игры и стабильное лидерство в составе «${t.name}» (рейтинг ${candidate.ovr || candidate.rating || 75})`
     });
     if (!db.foreignOffers) db.foreignOffers = [];
     db.foreignOffers.push(offer);
@@ -14184,7 +14911,7 @@ app.post("/api/club/contract/terminate", needClub, (req, res) => {
 app.get("/api/free-agents", (req, res) => {
   const q = norm(String(req.query.q || ""));
   const pos = String(req.query.pos || "").trim().toUpperCase();
-  let list = (db.players || []).filter((p) => !p.teamId);
+  let list = (db.players || []).filter((p) => !p.teamId && !p.abroadClub);
   if (pos && pos !== "ALL" && pos !== "ВСЕ") {
     if (pos === "DEF") list = list.filter((p) => ["ЦЗ", "ЛЗ", "ПЗ"].includes(p.pos));
     else if (pos === "MID") list = list.filter((p) => ["ОП", "ЦП", "АП"].includes(p.pos));
@@ -14205,6 +14932,7 @@ app.post("/api/club/free-agent/sign", needClub, (req, res) => {
   const p = player(pid);
   if (!p) return fail(res, "Игрок не найден", 404);
   if (p.teamId) return fail(res, `Игрок уже числится в клубе «${tn(p.teamId)}»`);
+  if (p.abroadClub) return fail(res, `Игрок выступает за рубежом в клубе «${p.abroadClub}»`);
   if (!Array.isArray(db.transfers)) db.transfers = [];
   const dup = db.transfers.find((t) => t.status === "pending" && t.type === "free_agent" && t.pid === p.id && t.to === req.tid);
   if (dup) {
