@@ -4115,19 +4115,30 @@ function classifyMatchTier(f) {
   }
   return { tier: "mid", label: "Обычный матч", reason: "Стандартный матч тура", avgPower: +avgPow.toFixed(1) };
 }
-function assignTourReferees(tourList) {
+function assignTourReferees(tourList, force = false) {
   const validMatches = tourList.filter((f) => f.comp === "rpl" || f.comp === "cup");
   const invalidMatches = tourList.filter((f) => f.comp !== "rpl" && f.comp !== "cup");
   for (const f of invalidMatches) {
+    if (f.manualReferees && !force) continue;
     delete f.refereeId;
     delete f.refereeName;
     delete f.assistants;
     delete f.reserveReferee;
     delete f.varReferee;
     delete f.avarReferee;
+    delete f.manualReferees;
   }
   if (!validMatches.length || !db?.referees?.length) return;
+  const isLocked = (f) => {
+    if (force) return false;
+    if (f.manualReferees) return true;
+    if (f.status === "done" || f.status === "live") return true;
+    return !!(f.refereeId && f.refereeName && Array.isArray(f.assistants) && f.assistants.length >= 2 && f.reserveReferee && f.varReferee && f.avarReferee);
+  };
   const usedHeadIds = /* @__PURE__ */ new Set();
+  for (const f of validMatches) {
+    if (isLocked(f) && f.refereeId) usedHeadIds.add(f.refereeId);
+  }
   const comp = validMatches[0].comp;
   let eligible = db.referees.filter((r) => !r.leagues || r.leagues.includes(comp));
   if (!eligible.length) eligible = db.referees;
@@ -4138,6 +4149,8 @@ function assignTourReferees(tourList) {
     return getTeamPowerScore(b.home) + getTeamPowerScore(b.away) - (getTeamPowerScore(a.home) + getTeamPowerScore(a.away));
   });
   for (const f of sortedMatches) {
+    if (isLocked(f)) continue;
+    if (force) delete f.manualReferees;
     let pool2 = eligible.filter((r) => !usedHeadIds.has(r.id));
     if (!pool2.length) pool2 = eligible;
     const homeCity = (team(f.home)?.city || "").trim().toLowerCase();
@@ -4163,6 +4176,7 @@ function assignTourReferees(tourList) {
   const shuffledAssts = [...asstPool].sort(() => Math.random() - 0.5);
   let asstIdx = 0;
   for (const f of validMatches) {
+    if (isLocked(f)) continue;
     const a1 = shuffledAssts[asstIdx % shuffledAssts.length]?.name || "\u0414\u043C\u0438\u0442\u0440\u0438\u0439 \u041C\u043E\u0441\u044F\u043A\u0438\u043D";
     const a2 = shuffledAssts[(asstIdx + 1) % shuffledAssts.length]?.name || "\u0415\u0433\u043E\u0440 \u0411\u043E\u043B\u0445\u043E\u0432\u0438\u0442\u0438\u043D";
     asstIdx += 2;
@@ -4371,7 +4385,7 @@ function load() {
     }
   }
   for (const f of db.fixtures) {
-    if (f.comp !== "rpl" && f.comp !== "cup") {
+    if (f.comp !== "rpl" && f.comp !== "cup" && !f.manualReferees) {
       delete f.refereeId;
       delete f.refereeName;
       delete f.assistants;
@@ -4389,7 +4403,7 @@ function load() {
     }
   }
   for (const list of Object.values(tours)) {
-    assignTourReferees(list);
+    assignTourReferees(list, false);
   }
   save();
   db.comps = COMPS;
@@ -10975,12 +10989,13 @@ var pubFx = (f) => {
     full: f.status === "live" || f.status === "done" ? !!f.st || f.status === "live" : fullSim(f),
     derby: !!db.derbies.find((d) => !d.principled && (d.a === f.home && d.b === f.away || d.a === f.away && d.b === f.home)),
     rivalry: !!db.derbies.find((d) => d.principled && (d.a === f.home && d.b === f.away || d.a === f.away && d.b === f.home)),
-    refereeId: f.comp === "rpl" || f.comp === "cup" ? f.refereeId || null : null,
-    refereeName: f.comp === "rpl" || f.comp === "cup" ? f.refereeName || null : null,
-    assistants: f.comp === "rpl" || f.comp === "cup" ? f.assistants || [] : [],
-    reserveReferee: f.comp === "rpl" || f.comp === "cup" ? f.reserveReferee || null : null,
-    varReferee: f.comp === "rpl" || f.comp === "cup" ? f.varReferee || null : null,
-    avarReferee: f.comp === "rpl" || f.comp === "cup" ? f.avarReferee || null : null,
+    refereeId: (f.comp === "rpl" || f.comp === "cup" || f.manualReferees || f.refereeId || f.refereeName) ? f.refereeId || null : null,
+    refereeName: (f.comp === "rpl" || f.comp === "cup" || f.manualReferees || f.refereeId || f.refereeName) ? f.refereeName || null : null,
+    assistants: (f.comp === "rpl" || f.comp === "cup" || f.manualReferees || f.refereeId || f.refereeName) ? (Array.isArray(f.assistants) ? f.assistants : []) : [],
+    reserveReferee: (f.comp === "rpl" || f.comp === "cup" || f.manualReferees || f.refereeId || f.refereeName) ? f.reserveReferee || null : null,
+    varReferee: (f.comp === "rpl" || f.comp === "cup" || f.manualReferees || f.refereeId || f.refereeName) ? f.varReferee || null : null,
+    avarReferee: (f.comp === "rpl" || f.comp === "cup" || f.manualReferees || f.refereeId || f.refereeName) ? f.avarReferee || null : null,
+    manualReferees: !!f.manualReferees,
     stadium,
     city,
     neutralField,
@@ -15944,22 +15959,131 @@ app.post("/api/admin/assistant", admin, (req, res) => {
   res.json({ ok: 1, assistant: a });
 });
 app.post("/api/admin/fixture/referee", admin, (req, res) => {
-  const f = fx(req.body.fid);
+  const b = req.body || {};
+  const f = fx(b.fid);
   if (!f) return fail(res, "\u041C\u0430\u0442\u0447 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D");
-  if (f.comp !== "rpl" && f.comp !== "cup") {
-    return fail(res, "\u0410\u0440\u0431\u0438\u0442\u0440\u044B \u043D\u0430\u0437\u043D\u0430\u0447\u0430\u044E\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u043D\u0430 \u043C\u0430\u0442\u0447\u0438 \u0420\u041F\u041B \u0438 \u041A\u0443\u0431\u043A\u0430 \u0420\u043E\u0441\u0441\u0438\u0438");
+  const force = !!b.force;
+
+  let nextHeadId = f.refereeId || null;
+  let nextHeadName = f.refereeName || null;
+
+  if (b.refereeId !== undefined || b.refereeName !== undefined) {
+    if (b.refereeId) {
+      const r = (db.referees || []).find((x) => x.id === b.refereeId);
+      if (!r) return fail(res, "\u0421\u0443\u0434\u044C\u044F \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D");
+      if (!force && (f.comp === "rpl" || f.comp === "cup")) {
+        const tourKey = getFixtureTourKey(f);
+        const conflict = (db.fixtures || []).find((x) => x.id !== f.id && getFixtureTourKey(x) === tourKey && x.refereeId === r.id);
+        if (conflict) {
+          return fail(res, `\u0410\u0440\u0431\u0438\u0442\u0440 ${r.name} \u0443\u0436\u0435 \u043D\u0430\u0437\u043D\u0430\u0447\u0435\u043D \u0433\u043B\u0430\u0432\u043D\u044B\u043C \u043D\u0430 \u043C\u0430\u0442\u0447 \xAB${tn(conflict.home)} \u2014 ${tn(conflict.away)}\xBB \u0432 \u044D\u0442\u043E\u043C \u0442\u0443\u0440\u0435! \u0413\u043B\u0430\u0432\u043D\u044B\u0439 \u0430\u0440\u0431\u0438\u0442\u0440 \u043C\u043E\u0436\u0435\u0442 \u0441\u0443\u0434\u0438\u0442\u044C \u0442\u043E\u043B\u044C\u043A\u043E 1 \u043C\u0430\u0442\u0447 \u0432 \u0442\u0443\u0440\u0435.`);
+        }
+      }
+      nextHeadId = r.id;
+      nextHeadName = r.name;
+    } else if (b.refereeName) {
+      const customName = String(b.refereeName).trim();
+      const matched = (db.referees || []).find((x) => x.name === customName);
+      if (matched && !force && (f.comp === "rpl" || f.comp === "cup")) {
+        const tourKey = getFixtureTourKey(f);
+        const conflict = (db.fixtures || []).find((x) => x.id !== f.id && getFixtureTourKey(x) === tourKey && x.refereeId === matched.id);
+        if (conflict) {
+          return fail(res, `\u0410\u0440\u0431\u0438\u0442\u0440 ${matched.name} \u0443\u0436\u0435 \u043D\u0430\u0437\u043D\u0430\u0447\u0435\u043D \u0433\u043B\u0430\u0432\u043D\u044B\u043C \u043D\u0430 \u043C\u0430\u0442\u0447 \xAB${tn(conflict.home)} \u2014 ${tn(conflict.away)}\xBB \u0432 \u044D\u0442\u043E\u043C \u0442\u0443\u0440\u0435! \u0413\u043B\u0430\u0432\u043D\u044B\u0439 \u0430\u0440\u0431\u0438\u0442\u0440 \u043C\u043E\u0436\u0435\u0442 \u0441\u0443\u0434\u0438\u0442\u044C \u0442\u043E\u043B\u044C\u043A\u043E 1 \u043C\u0430\u0442\u0447 \u0432 \u0442\u0443\u0440\u0435.`);
+        }
+      }
+      nextHeadId = matched ? matched.id : null;
+      nextHeadName = customName || null;
+    } else {
+      nextHeadId = null;
+      nextHeadName = null;
+    }
   }
-  const r = db.referees.find((x) => x.id === req.body.refereeId);
-  if (!r) return fail(res, "\u0421\u0443\u0434\u044C\u044F \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D");
-  const tourKey = getFixtureTourKey(f);
-  const conflict = (db.fixtures || []).find((x) => x.id !== f.id && getFixtureTourKey(x) === tourKey && x.refereeId === r.id);
-  if (conflict) {
-    return fail(res, `\u0410\u0440\u0431\u0438\u0442\u0440 ${r.name} \u0443\u0436\u0435 \u043D\u0430\u0437\u043D\u0430\u0447\u0435\u043D \u0433\u043B\u0430\u0432\u043D\u044B\u043C \u043D\u0430 \u043C\u0430\u0442\u0447 \xAB${tn(conflict.home)} \u2014 ${tn(conflict.away)}\xBB \u0432 \u044D\u0442\u043E\u043C \u0442\u0443\u0440\u0435! \u0413\u043B\u0430\u0432\u043D\u044B\u0439 \u0430\u0440\u0431\u0438\u0442\u0440 \u043C\u043E\u0436\u0435\u0442 \u0441\u0443\u0434\u0438\u0442\u044C \u0442\u043E\u043B\u044C\u043A\u043E 1 \u043C\u0430\u0442\u0447 \u0432 \u0442\u0443\u0440\u0435.`);
+
+  let nextAssistants = Array.isArray(f.assistants) ? [...f.assistants] : [];
+  if (Array.isArray(b.assistants)) {
+    nextAssistants = b.assistants.map((x: any) => String(x || "").trim()).filter(Boolean).slice(0, 2);
+  } else if (b.assistant1 !== undefined || b.assistant2 !== undefined) {
+    const a1 = b.assistant1 !== undefined ? String(b.assistant1 || "").trim() : (nextAssistants[0] || "");
+    const a2 = b.assistant2 !== undefined ? String(b.assistant2 || "").trim() : (nextAssistants[1] || "");
+    nextAssistants = [a1, a2].filter(Boolean);
   }
-  f.refereeId = r.id;
-  f.refereeName = r.name;
+  if (!force && nextAssistants.length === 2 && nextAssistants[0] === nextAssistants[1]) {
+    return fail(res, "1-\u0439 \u0438 2-\u0439 \u043F\u043E\u043C\u043E\u0449\u043D\u0438\u043A\u0438 \u0441\u0443\u0434\u044C\u0438 \u043D\u0435 \u043C\u043E\u0433\u0443\u0442 \u0441\u043E\u0432\u043F\u0430\u0434\u0430\u0442\u044C");
+  }
+
+  const nextReserve = b.reserveReferee !== undefined ? (String(b.reserveReferee || "").trim() || null) : (f.reserveReferee || null);
+  const nextVar = b.varReferee !== undefined ? (String(b.varReferee || "").trim() || null) : (f.varReferee || null);
+  const nextAvar = b.avarReferee !== undefined ? (String(b.avarReferee || "").trim() || null) : (f.avarReferee || null);
+
+  if (!force) {
+    if (nextHeadName && nextReserve && nextHeadName === nextReserve) {
+      return fail(res, "\u0413\u043B\u0430\u0432\u043D\u044B\u0439 \u0430\u0440\u0431\u0438\u0442\u0440 \u0438 \u0440\u0435\u0437\u0435\u0440\u0432\u043D\u044B\u0439 \u0441\u0443\u0434\u044C\u044F \u043D\u0435 \u043C\u043E\u0433\u0443\u0442 \u0441\u043E\u0432\u043F\u0430\u0434\u0430\u0442\u044C");
+    }
+    if (nextHeadName && nextVar && nextHeadName === nextVar) {
+      return fail(res, "\u0413\u043B\u0430\u0432\u043D\u044B\u0439 \u0430\u0440\u0431\u0438\u0442\u0440 \u0438 \u0430\u0440\u0431\u0438\u0442\u0440 \u0412\u0410\u0420 \u043D\u0435 \u043C\u043E\u0433\u0443\u0442 \u0441\u043E\u0432\u043F\u0430\u0434\u0430\u0442\u044C");
+    }
+    if (nextHeadName && nextAvar && nextHeadName === nextAvar) {
+      return fail(res, "\u0413\u043B\u0430\u0432\u043D\u044B\u0439 \u0430\u0440\u0431\u0438\u0442\u0440 \u0438 \u0410\u0412\u0410\u0420 \u043D\u0435 \u043C\u043E\u0433\u0443\u0442 \u0441\u043E\u0432\u043F\u0430\u0434\u0430\u0442\u044C");
+    }
+    if (nextVar && nextAvar && nextVar === nextAvar) {
+      return fail(res, "\u0410\u0440\u0431\u0438\u0442\u0440 \u0412\u0410\u0420 \u0438 \u0410\u0412\u0410\u0420 \u043D\u0435 \u043C\u043E\u0433\u0443\u0442 \u0441\u043E\u0432\u043F\u0430\u0434\u0430\u0442\u044C");
+    }
+    if (nextReserve && nextVar && nextReserve === nextVar) {
+      return fail(res, "\u0420\u0435\u0437\u0435\u0440\u0432\u043D\u044B\u0439 \u0441\u0443\u0434\u044C\u044F \u0438 \u0430\u0440\u0431\u0438\u0442\u0440 \u0412\u0410\u0420 \u043D\u0435 \u043C\u043E\u0433\u0443\u0442 \u0441\u043E\u0432\u043F\u0430\u0434\u0430\u0442\u044C");
+    }
+    if (nextReserve && nextAvar && nextReserve === nextAvar) {
+      return fail(res, "\u0420\u0435\u0437\u0435\u0440\u0432\u043D\u044B\u0439 \u0441\u0443\u0434\u044C\u044F \u0438 \u0410\u0412\u0410\u0420 \u043D\u0435 \u043C\u043E\u0433\u0443\u0442 \u0441\u043E\u0432\u043F\u0430\u0434\u0430\u0442\u044C");
+    }
+  }
+
+  f.refereeId = nextHeadId;
+  f.refereeName = nextHeadName;
+  f.assistants = nextAssistants;
+  f.reserveReferee = nextReserve;
+  f.varReferee = nextVar;
+  f.avarReferee = nextAvar;
+  f.manualReferees = true;
+
+  const cachedMatch = getMatch(f.id);
+  if (cachedMatch && cachedMatch.ctx) {
+    const headRefObj = (db.referees || []).find((r) => r.id === f.refereeId || r.name === f.refereeName) || (f.refereeName ? {
+      name: f.refereeName,
+      city: "\u0420\u043E\u0441\u0441\u0438\u044F",
+      rating: 7.5,
+      bio: `\u0413\u043B\u0430\u0432\u043D\u044B\u0439 \u0430\u0440\u0431\u0438\u0442\u0440 \u0432\u0441\u0442\u0440\u0435\u0447\u0438 \u2014 ${f.refereeName}`,
+      matches: 0,
+      yellows: 0,
+      reds: 0,
+      penalties: 0
+    } : null);
+    const varRefObj = (db.referees || []).find((r) => r.name === f.varReferee) || (f.varReferee ? {
+      name: f.varReferee,
+      bio: `\u0410\u0440\u0431\u0438\u0442\u0440 VAR \u2014 ${f.varReferee}`
+    } : null);
+    cachedMatch.ctx.refereeCrew = {
+      ...(cachedMatch.ctx.refereeCrew || {}),
+      head: headRefObj,
+      matchTier: classifyMatchTier(f),
+      asst1: f.assistants[0] || "\u0414\u043C\u0438\u0442\u0440\u0438\u0439 \u041C\u043E\u0441\u044F\u043A\u0438\u043D",
+      asst2: f.assistants[1] || "\u0412\u0430\u043B\u0435\u043D\u0442\u0438\u043D \u041C\u0443\u0440\u0430\u0448\u043E\u0432",
+      fourth: f.reserveReferee || "\u0412\u0435\u0440\u0430 \u041E\u043F\u0435\u0439\u043A\u0438\u043D\u0430",
+      var: f.varReferee || null,
+      varProfile: varRefObj,
+      avar: f.avarReferee || null
+    };
+    putMatch(f.id, cachedMatch);
+  }
+
   save();
-  res.json({ ok: 1, refereeName: r.name });
+  res.json({
+    ok: 1,
+    fixture: pubFx(f),
+    refereeId: f.refereeId,
+    refereeName: f.refereeName,
+    assistants: f.assistants,
+    reserveReferee: f.reserveReferee,
+    varReferee: f.varReferee,
+    avarReferee: f.avarReferee
+  });
 });
 app.post("/api/admin/referee/portfolio", admin, async (req, res) => {
   const r = db.referees.find((x) => x.id === req.body.refereeId);
@@ -15994,7 +16118,7 @@ app.post("/api/admin/referees/assign-round", admin, (req, res) => {
     (f) => f.comp === comp && f.status !== "done" && (label ? f.label === label : round !== void 0 ? String(f.round) === String(round) : true)
   );
   if (!matches.length) return fail(res, "\u041D\u0435\u0442 \u0437\u0430\u043F\u043B\u0430\u043D\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u044B\u0445 \u043C\u0430\u0442\u0447\u0435\u0439 \u0432 \u0432\u044B\u0431\u0440\u0430\u043D\u043D\u043E\u043C \u0442\u0443\u0440\u0435");
-  assignTourReferees(matches);
+  assignTourReferees(matches, true);
   save();
   res.json({ ok: 1, count: matches.length });
 });

@@ -1745,6 +1745,347 @@ window.openMatchScheduleModal = async function(fixtureOrId, onSaved) {
   });
 };
 
+window.loadAdminRefereesPool = async function(forceRefresh = false) {
+  if (!forceRefresh && window.__adminRefPool && (Date.now() - window.__adminRefPool.at) < 15000) {
+    return window.__adminRefPool.data;
+  }
+  const [refData, fixtures] = await Promise.all([
+    api('/admin/referees'),
+    api('/fixtures').catch(() => [])
+  ]);
+  const data = {
+    referees: refData?.referees || [],
+    assistants: refData?.assistants || [],
+    fixtures: Array.isArray(fixtures) ? fixtures : []
+  };
+  window.__adminRefPool = { at: Date.now(), data };
+  return data;
+};
+
+function getClientFixtureTourKey(f) {
+  if (!f) return '';
+  const s = f.season || S.st?.season || S.st?.settings?.season || '';
+  if (f.comp === 'rpl') return `${s}:rpl:${f.round}`;
+  if (f.comp === 'cup') {
+    const p = f.cupPath || (Number(f.round) <= 6 ? 'rpl_group' : 'regions_qual');
+    const r = f.qualRound || f.round || f.cupStage || 1;
+    return `${s}:cup:${p}:${r}`;
+  }
+  return `${s}:${f.comp}:${f.round || 1}`;
+}
+
+function buildRefereeCrewEditorHtml(f, refs, assts, prefix = 'ref_ed', allFx = null) {
+  const sortedRefs = [...(refs || [])].sort((a, b) => (b.rating || 0) - (a.rating || 0) || String(a.name).localeCompare(String(b.name), 'ru'));
+  const sortedAssts = [...(assts || [])].sort((a, b) => String(a.name).localeCompare(String(b.name), 'ru'));
+  const varRefs = [...sortedRefs].sort((a, b) => (b.varRole ? 1 : 0) - (a.varRole ? 1 : 0) || (b.rating || 0) - (a.rating || 0));
+  const tourKey = getClientFixtureTourKey(f);
+  const fxPool = Array.isArray(allFx) ? allFx : (window.__adminRefPool?.data?.fixtures || S.st?.fixtures || []);
+  const sameTourFx = fxPool.filter(x => x.id !== f.id && getClientFixtureTourKey(x) === tourKey && (f.comp === 'rpl' || f.comp === 'cup'));
+
+  const curHeadId = f.refereeId || (sortedRefs.find(r => r.name === f.refereeName)?.id) || '';
+  const curHeadName = f.refereeName || '';
+  const curA1 = (Array.isArray(f.assistants) && f.assistants[0]) || '';
+  const curA2 = (Array.isArray(f.assistants) && f.assistants[1]) || '';
+  const curRes = f.reserveReferee || '';
+  const curVar = f.varReferee || '';
+  const curAvar = f.avarReferee || '';
+
+  const headOptions = [
+    `<option value="">— Не назначен —</option>`,
+    ...sortedRefs.map(r => {
+      const busy = sameTourFx.find(x => x.refereeId === r.id || x.refereeName === r.name);
+      const sel = (curHeadId && r.id === curHeadId) || (!curHeadId && curHeadName && r.name === curHeadName) ? 'selected' : '';
+      const meta = [r.city, r.rating ? `★${Number(r.rating).toFixed(2)}` : null, r.varRole || null].filter(Boolean).join(' · ');
+      const busyTxt = busy ? ` [занят: ${teamName(busy.home)} — ${teamName(busy.away)}]` : '';
+      return `<option value="${e(r.id)}" data-name="${e(r.name)}" data-city="${e(r.city || '')}" ${busy ? `data-busy="${e(teamName(busy.home) + ' — ' + teamName(busy.away))}"` : ''} ${sel}>${e(r.name)}${meta ? ` (${e(meta)})` : ''}${e(busyTxt)}</option>`;
+    }),
+    ...(curHeadName && !sortedRefs.some(r => r.id === curHeadId || r.name === curHeadName)
+      ? [`<option value="__custom__:${e(curHeadName)}" data-name="${e(curHeadName)}" selected>${e(curHeadName)} (текущий)</option>`]
+      : [])
+  ].join('');
+
+  const buildAsstOptions = (selectedName) => {
+    const names = sortedAssts.map(a => a.name);
+    const hasCustom = selectedName && !names.includes(selectedName);
+    return [
+      `<option value="">— Не назначен —</option>`,
+      ...(hasCustom ? [`<option value="${e(selectedName)}" selected>${e(selectedName)} (текущий)</option>`] : []),
+      ...sortedAssts.map(a => `<option value="${e(a.name)}" ${a.name === selectedName ? 'selected' : ''}>${e(a.name)}${a.rating ? ` (★${Number(a.rating).toFixed(2)})` : ''}</option>`)
+    ].join('');
+  };
+
+  const buildRefNameOptions = (pool, selectedName, emptyLabel) => {
+    const names = pool.map(r => r.name);
+    const hasCustom = selectedName && !names.includes(selectedName);
+    return [
+      `<option value="">${e(emptyLabel)}</option>`,
+      ...(hasCustom ? [`<option value="${e(selectedName)}" selected>${e(selectedName)} (текущий)</option>`] : []),
+      ...pool.map(r => {
+        const roleTag = r.varRole ? ` · ${r.varRole}` : (r.role === 'Резервный судья' ? ' · Резерв' : '');
+        return `<option value="${e(r.name)}" ${r.name === selectedName ? 'selected' : ''}>${e(r.name)}${r.city ? ` (${e(r.city)}${e(roleTag)})` : (roleTag ? ` (${e(roleTag.replace(/^ · /, ''))})` : '')}</option>`;
+      })
+    ].join('');
+  };
+
+  return `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <div class="small muted">Назначьте всех 6 арбитров бригады или подберите свободную бригаду автоматически.</div>
+      <button type="button" class="btn alt sm" id="${prefix}_auto">🎲 Подобрать свободную бригаду</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:10px">
+      <div>
+        <label class="small" style="display:block;margin-bottom:4px;font-weight:700">👨‍⚖️ Главный арбитр</label>
+        <select id="${prefix}_head" style="width:100%">${headOptions}</select>
+      </div>
+      <div>
+        <label class="small" style="display:block;margin-bottom:4px;font-weight:700">🚩 1-й помощник судьи</label>
+        <select id="${prefix}_a1" style="width:100%">${buildAsstOptions(curA1)}</select>
+      </div>
+      <div>
+        <label class="small" style="display:block;margin-bottom:4px;font-weight:700">🚩 2-й помощник судьи</label>
+        <select id="${prefix}_a2" style="width:100%">${buildAsstOptions(curA2)}</select>
+      </div>
+      <div>
+        <label class="small" style="display:block;margin-bottom:4px;font-weight:700">🔁 Резервный судья</label>
+        <select id="${prefix}_res" style="width:100%">${buildRefNameOptions(sortedRefs, curRes, '— Не назначен —')}</select>
+      </div>
+      <div>
+        <label class="small" style="display:block;margin-bottom:4px;font-weight:700">📺 Арбитр ВАР (VAR)</label>
+        <select id="${prefix}_var" style="width:100%">${buildRefNameOptions(varRefs, curVar, '— Без ВАР / Не назначен —')}</select>
+      </div>
+      <div>
+        <label class="small" style="display:block;margin-bottom:4px;font-weight:700">🖥️ Ассистент ВАР (AVAR)</label>
+        <select id="${prefix}_avar" style="width:100%">${buildRefNameOptions(varRefs, curAvar, '— Без АВАР / Не назначен —')}</select>
+      </div>
+    </div>
+    <div id="${prefix}_warn" style="display:none;background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:8px 12px;border-radius:8px;font-size:12px;line-height:1.4;margin-bottom:10px"></div>
+    <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;cursor:pointer;margin-bottom:10px;user-select:none">
+      <input type="checkbox" id="${prefix}_force">
+      <span>Разрешить совмещение (игнорировать занятость арбитра в этом туре и дублирование ролей)</span>
+    </label>
+  `;
+}
+
+function bindRefereeCrewEditor(rootEl, f, refs, assts, prefix, saveBtnEl, onSaved, allFx = null) {
+  const headEl = rootEl.querySelector(`#${prefix}_head`);
+  const a1El = rootEl.querySelector(`#${prefix}_a1`);
+  const a2El = rootEl.querySelector(`#${prefix}_a2`);
+  const resEl = rootEl.querySelector(`#${prefix}_res`);
+  const varEl = rootEl.querySelector(`#${prefix}_var`);
+  const avarEl = rootEl.querySelector(`#${prefix}_avar`);
+  const forceEl = rootEl.querySelector(`#${prefix}_force`);
+  const warnEl = rootEl.querySelector(`#${prefix}_warn`);
+  const autoEl = rootEl.querySelector(`#${prefix}_auto`);
+
+  const getHeadInfo = () => {
+    const val = headEl.value || '';
+    const opt = headEl.selectedOptions[0];
+    if (val.startsWith('__custom__:')) {
+      return { refereeId: null, refereeName: val.slice('__custom__:'.length), busy: '' };
+    }
+    return {
+      refereeId: val || null,
+      refereeName: opt?.dataset?.name || '',
+      busy: opt?.dataset?.busy || ''
+    };
+  };
+
+  const updateWarnings = () => {
+    if (!warnEl) return;
+    const msgs = [];
+    const h = getHeadInfo();
+    const a1 = a1El.value;
+    const a2 = a2El.value;
+    const res = resEl.value;
+    const v = varEl.value;
+    const av = avarEl.value;
+    if (h.busy) msgs.push(`⚠️ Арбитр <b>${e(h.refereeName)}</b> уже назначен главным в этом туре на матч «${e(h.busy)}».`);
+    if (a1 && a2 && a1 === a2) msgs.push('⚠️ 1-й и 2-й помощники судьи совпадают.');
+    if (h.refereeName && res && h.refereeName === res) msgs.push('⚠️ Главный арбитр и резервный судья совпадают.');
+    if (h.refereeName && v && h.refereeName === v) msgs.push('⚠️ Главный арбитр и арбитр ВАР совпадают.');
+    if (h.refereeName && av && h.refereeName === av) msgs.push('⚠️ Главный арбитр и АВАР совпадают.');
+    if (v && av && v === av) msgs.push('⚠️ Арбитр ВАР и АВАР совпадают.');
+    if (res && v && res === v) msgs.push('⚠️ Резервный судья и арбитр ВАР совпадают.');
+    if (res && av && res === av) msgs.push('⚠️ Резервный судья и АВАР совпадают.');
+    if (msgs.length) {
+      warnEl.innerHTML = msgs.join('<br>');
+      warnEl.style.display = 'block';
+    } else {
+      warnEl.style.display = 'none';
+    }
+  };
+
+  [headEl, a1El, a2El, resEl, varEl, avarEl].forEach(el => {
+    if (el) el.onchange = updateWarnings;
+  });
+  updateWarnings();
+
+  if (autoEl) {
+    autoEl.onclick = () => {
+      const homeCity = (S.st?.teams?.find(t => t.id === f.home)?.city || '').trim().toLowerCase();
+      const awayCity = (S.st?.teams?.find(t => t.id === f.away)?.city || '').trim().toLowerCase();
+      const tourKey = getClientFixtureTourKey(f);
+      const fxPool = Array.isArray(allFx) ? allFx : (window.__adminRefPool?.data?.fixtures || S.st?.fixtures || []);
+      const sameTourFx = fxPool.filter(x => x.id !== f.id && getClientFixtureTourKey(x) === tourKey && (f.comp === 'rpl' || f.comp === 'cup'));
+      const busyIds = new Set(sameTourFx.map(x => x.refereeId).filter(Boolean));
+      const busyNames = new Set(sameTourFx.map(x => x.refereeName).filter(Boolean));
+
+      const freeRefs = (refs || []).filter(r => !busyIds.has(r.id) && !busyNames.has(r.name));
+      const nonSameCity = freeRefs.filter(r => {
+        const c = (r.city || '').trim().toLowerCase();
+        return !c || (c !== homeCity && c !== awayCity);
+      });
+      const headPool = nonSameCity.length ? nonSameCity : (freeRefs.length ? freeRefs : (refs || []));
+      if (headPool.length) {
+        const picked = headPool[Math.floor(Math.random() * Math.min(headPool.length, 5))];
+        headEl.value = picked.id;
+      }
+      const headName = getHeadInfo().refereeName;
+      const freeAssts = [...(assts || [])].sort(() => Math.random() - 0.5);
+      if (freeAssts[0]) a1El.value = freeAssts[0].name;
+      if (freeAssts[1]) a2El.value = freeAssts[1].name;
+
+      const others = (refs || []).filter(r => r.name !== headName && !busyNames.has(r.name));
+      const otherPool = others.length >= 3 ? others : (refs || []).filter(r => r.name !== headName);
+      const shuffled = [...otherPool].sort(() => Math.random() - 0.5);
+      const pickRes = shuffled.find(r => r.role === 'Резервный судья') || shuffled[0];
+      if (pickRes) resEl.value = pickRes.name;
+      const pickVar = shuffled.find(r => r.varRole && r.name !== resEl.value) || shuffled.find(r => r.name !== resEl.value);
+      if (pickVar) varEl.value = pickVar.name;
+      const pickAvar = shuffled.find(r => r.name !== resEl.value && r.name !== varEl.value) || shuffled.find(r => r.name !== varEl.value);
+      if (pickAvar) avarEl.value = pickAvar.name;
+
+      updateWarnings();
+      toast('Свободная бригада подобрана (нажмите «Сохранить»)');
+    };
+  }
+
+  if (saveBtnEl) {
+    saveBtnEl.onclick = async () => {
+      const h = getHeadInfo();
+      const a1 = (a1El.value || '').trim();
+      const a2 = (a2El.value || '').trim();
+      const reserveReferee = (resEl.value || '').trim();
+      const varReferee = (varEl.value || '').trim();
+      const avarReferee = (avarEl.value || '').trim();
+      const force = !!forceEl?.checked;
+
+      saveBtnEl.disabled = true;
+      try {
+        const res = await api('/admin/fixture/referee', {
+          fid: f.id,
+          refereeId: h.refereeId,
+          refereeName: h.refereeName,
+          assistants: [a1, a2].filter(Boolean),
+          reserveReferee,
+          varReferee,
+          avarReferee,
+          force
+        });
+        const upd = res.fixture || {};
+        const patch = {
+          refereeId: upd.refereeId ?? res.refereeId ?? h.refereeId,
+          refereeName: upd.refereeName ?? res.refereeName ?? (h.refereeName || null),
+          assistants: upd.assistants ?? res.assistants ?? [a1, a2].filter(Boolean),
+          reserveReferee: upd.reserveReferee ?? res.reserveReferee ?? (reserveReferee || null),
+          varReferee: upd.varReferee ?? res.varReferee ?? (varReferee || null),
+          avarReferee: upd.avarReferee ?? res.avarReferee ?? (avarReferee || null),
+          manualReferees: true
+        };
+        Object.assign(f, patch);
+        if (M?.fixture?.id === f.id) Object.assign(M.fixture, patch);
+        const matchInSt = (S.st?.fixtures || []).find(x => x.id === f.id);
+        if (matchInSt) Object.assign(matchInSt, patch);
+        const matchInPool = (window.__adminRefPool?.data?.fixtures || []).find(x => x.id === f.id);
+        if (matchInPool) Object.assign(matchInPool, patch);
+        toast('Бригада арбитров на матч обновлена!');
+        if (onSaved) onSaved(f);
+      } catch (err) {
+        toast('Ошибка: ' + (err.message || err));
+      } finally {
+        saveBtnEl.disabled = false;
+      }
+    };
+  }
+}
+
+window.openMatchRefereeModal = async function(fixtureOrId, onSaved) {
+  if (S.me?.role !== 'admin') {
+    toast('Назначение бригады арбитров доступно только администратору');
+    return;
+  }
+  let f = typeof fixtureOrId === 'object' && fixtureOrId ? fixtureOrId : null;
+  if (!f && typeof fixtureOrId === 'string') {
+    f = (M?.fixture?.id === fixtureOrId ? M.fixture : null) || (S.st?.fixtures || []).find(x => x.id === fixtureOrId);
+    if (!f) {
+      try {
+        const m = await api('/match/' + fixtureOrId);
+        f = m?.fixture;
+      } catch (err) {
+        toast('Матч не найден');
+        return;
+      }
+    }
+  }
+  if (!f) {
+    toast('Матч не найден');
+    return;
+  }
+
+  let pool;
+  try {
+    pool = await window.loadAdminRefereesPool(true);
+  } catch (err) {
+    toast('Не удалось загрузить список арбитров: ' + (err.message || err));
+    return;
+  }
+  const refs = pool.referees || [];
+  const assts = pool.assistants || [];
+  const allFx = pool.fixtures || [];
+  const homeLogo = f.homeLogo || teamLogo(f.home);
+  const awayLogo = f.awayLogo || teamLogo(f.away);
+  const statusText = f.status === 'done' ? `Сыгран (${f.hg}:${f.ag})` : (f.status === 'live' ? 'Идёт сейчас' : 'Запланирован');
+  const statusColor = f.status === 'done' ? '#166534' : (f.status === 'live' ? '#dc2626' : '#2563eb');
+
+  const content = `
+    <div style="max-width:640px;width:100%">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;border-bottom:1px solid var(--line);padding-bottom:10px;gap:10px">
+        <div>
+          <div style="font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">
+            ${e(compName(f.comp))} · ${e(f.label || 'Матч')}
+          </div>
+          <h3 style="margin:2px 0 0;font-size:17px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            ${homeLogo ? `<img src="${homeLogo}" style="width:20px;height:20px;object-fit:contain"/>` : ''}
+            <span>${e(f.homeName || teamName(f.home))}</span>
+            <span style="color:var(--muted)">—</span>
+            ${awayLogo ? `<img src="${awayLogo}" style="width:20px;height:20px;object-fit:contain"/>` : ''}
+            <span>${e(f.awayName || teamName(f.away))}</span>
+          </h3>
+        </div>
+        <div style="text-align:right">
+          <span style="background:${statusColor}15;color:${statusColor};border:1px solid ${statusColor}40;padding:2px 8px;border-radius:4px;font-size:11.5px;font-weight:700;white-space:nowrap">
+            ${statusText}
+          </span>
+        </div>
+      </div>
+      ${f.status === 'done' ? `<div style="background:#fffbeb;border:1px solid #fde68a;color:#92400e;padding:8px 12px;border-radius:8px;font-size:12px;margin-bottom:12px">ℹ️ Матч уже завершён — изменение бригады обновит протокол матча, но накопленная ранее сезонная статистика арбитров не пересчитывается.</div>` : ''}
+      ${buildRefereeCrewEditorHtml(f, refs, assts, 'ref_modal', allFx)}
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
+        <button class="btn alt" id="ref_modal_cancel" type="button">Отмена</button>
+        <button class="btn" id="ref_modal_save" type="button" style="background:#0d7b51;color:#fff;font-weight:700">💾 Сохранить бригаду</button>
+      </div>
+    </div>
+  `;
+
+  modal(content, mEl => {
+    mEl.querySelector('#ref_modal_cancel').onclick = () => mEl.remove();
+    bindRefereeCrewEditor(mEl, f, refs, assts, 'ref_modal', mEl.querySelector('#ref_modal_save'), (savedFx) => {
+      mEl.remove();
+      if (onSaved) onSaved(savedFx);
+    }, allFx);
+  });
+};
+
 const teamName = id => (S.st?.teams?.find(t => t.id === id) || {}).name || '?';
 const compName = id => (S.st?.comps?.find(c => c.id === id) || {}).name || id;
 const age = (b, d) => {
@@ -3506,7 +3847,7 @@ function drawMatch(app, id) {
     <span>⏰ Реальное: <b>${fmtD(f.realDate || f.date)} ${f.realTime ? f.realTime + ' МСК' : ''}</b></span>
     ${S.me?.role === 'admin' ? `<button id="btn_edit_match_schedule" class="btn alt sm" type="button" style="padding:2px 8px;font-size:11px;font-weight:700;margin-left:6px;cursor:pointer">✏️ Изменить дату и время</button>` : ''}
   </div>
-  ${f.refereeName ? `<div class="meta" style="margin-top:4px;font-size:12px">Судья: <b>${e(f.refereeName)}</b>${f.assistants?.length ? ` · Помощники: ${f.assistants.map(e).join(', ')}` : ''}${f.reserveReferee ? ` · Резервный: ${e(f.reserveReferee)}` : ''}${f.varReferee ? ` · ВАР: ${e(f.varReferee)}` : ''}${f.avarReferee ? ` · АВАР: ${e(f.avarReferee)}` : ''}</div>` : ''}
+  ${(f.refereeName || S.me?.role === 'admin') ? `<div class="meta" style="margin-top:4px;font-size:12px;display:flex;align-items:center;justify-content:center;gap:6px;flex-wrap:wrap"><span>${f.refereeName ? `Судья: <b>${e(f.refereeName)}</b>${f.assistants?.length ? ` · Помощники: ${f.assistants.map(e).join(', ')}` : ''}${f.reserveReferee ? ` · Резервный: ${e(f.reserveReferee)}` : ''}${f.varReferee ? ` · ВАР: ${e(f.varReferee)}` : ''}${f.avarReferee ? ` · АВАР: ${e(f.avarReferee)}` : ''}` : 'Судейская бригада не назначена'}</span>${S.me?.role === 'admin' ? `<button id="btn_edit_match_referees" class="btn alt sm" type="button" style="padding:2px 8px;font-size:11px;font-weight:700;cursor:pointer">⚖️ ${f.refereeName ? 'Изменить бригаду арбитров' : 'Назначить бригаду арбитров'}</button>` : ''}</div>` : ''}
   <div class="line">
     <div class="tm-box r">
       <div class="tm r">${e(f.homeName)}</div>
@@ -3577,6 +3918,12 @@ ${motm && motmPlayer ? `
   if (bEdSched) {
     bEdSched.onclick = () => {
       window.openMatchScheduleModal(f, () => drawMatch(app, id));
+    };
+  }
+  const bEdRefs = app.querySelector('#btn_edit_match_referees');
+  if (bEdRefs) {
+    bEdRefs.onclick = () => {
+      window.openMatchRefereeModal(f, () => drawMatch(app, id));
     };
   }
   paintMatch();
@@ -4221,6 +4568,14 @@ function paintMatch() {
       <button class="btn" id="btn_save_mtab_schedule" style="background:#0d7b51;font-weight:700">💾 Сохранить дату и время для этого матча</button>
     </div>
 
+    <div class="panel" id="mtab_ref_panel" style="border-left:4px solid #2563eb">
+      <div class="row sp" style="margin-bottom:8px">
+        <h3 style="margin:0;font-size:16px">⚖️ Бригада арбитров на этот матч</h3>
+        <span class="tag" style="background:#dbeafe;color:#1e40af;border-color:#93c5fd;font-weight:700">Администратор</span>
+      </div>
+      <div id="mtab_ref_body" class="muted small">Загрузка списка арбитров…</div>
+    </div>
+
     <div class="panel">
       <h3>Вопрос по матчу</h3>
       <div class="row"><input id="q" placeholder="Почему проиграла эта команда? Как сыграл такой-то игрок?" style="flex:1;min-width:240px"><button class="btn" id="ask" ${f.status !== 'done' ? 'disabled' : ''}>Спросить</button></div>
@@ -4282,6 +4637,26 @@ function paintMatch() {
           toast('Ошибка: ' + (x.message || x));
         }
       };
+    }
+
+    const refBodyEl = $('#mtab_ref_body');
+    if (refBodyEl) {
+      window.loadAdminRefereesPool(false).then(pool => {
+        if (!document.body.contains(refBodyEl)) return;
+        const refs = pool.referees || [];
+        const assts = pool.assistants || [];
+        const allFx = pool.fixtures || [];
+        refBodyEl.innerHTML = `
+          ${f.status === 'done' ? '<div style="background:#fffbeb;border:1px solid #fde68a;color:#92400e;padding:8px 12px;border-radius:8px;font-size:12px;margin-bottom:10px">ℹ️ Матч уже завершён — изменение бригады обновит протокол матча.</div>' : ''}
+          ${buildRefereeCrewEditorHtml(f, refs, assts, 'mtab_ref', allFx)}
+          <button class="btn" id="btn_save_mtab_referees" type="button" style="background:#2563eb;font-weight:700">💾 Сохранить бригаду арбитров</button>
+        `;
+        bindRefereeCrewEditor(refBodyEl, f, refs, assts, 'mtab_ref', $('#btn_save_mtab_referees'), () => {
+          drawMatch(app, id);
+        }, allFx);
+      }).catch(err => {
+        refBodyEl.innerHTML = `<div class="warn">Не удалось загрузить судейский корпус: ${e(err.message || err)}</div>`;
+      });
     }
 
     $('#ask').onclick = async () => {
@@ -8151,7 +8526,7 @@ async function pgAdmin(app) {
     </div>
     <div class="panel"><div class="row">${(S.st?.comps || []).map(c => `<button class="btn sm ${c.id === AF.comp ? '' : 'alt'}" data-c="${c.id}">${e(c.name)}</button>`).join('')}<select id="rsel" style="max-width:200px">${labels.map(l => `<option ${l === AF.round ? 'selected' : ''}>${e(l)}</option>`).join('')}</select>
     <button class="btn" id="runr">Запустить все матчи этого тура</button></div><p class="muted small">Все матчи тура играются с подробными событиями, статистикой и мгновенным дублированием каждого события в Telegram-канал. Автозапуск по времени включается в «Настройках».</p></div>
-    <div class="panel">${list.length ? list.map(f => `<div class="row sp" style="padding:6px 0;border-bottom:1px solid var(--line)"><div style="flex:1;min-width:260px">${fxRow(f)}</div><div class="row"><button class="btn alt sm" data-ed="${f.id}" title="Изменить дату и время этого матча">📅 Дата/время</button>${f.status === 'scheduled' ? `<button class="btn sm" data-run="${f.id}">Запуск</button><button class="btn alt sm" data-lu="${f.id}">Составы</button>` : ''}${['done', 'live', 'queued', 'generating'].includes(f.status) ? `<button class="btn alt sm" data-rs="${f.id}">Сбросить</button>` : ''}</div></div>`).join('') : '<div class="empty">Нет матчей. Создайте расписание сезона.</div>'}</div>`;
+    <div class="panel">${list.length ? list.map(f => `<div class="row sp" style="padding:6px 0;border-bottom:1px solid var(--line)"><div style="flex:1;min-width:260px">${fxRow(f)}</div><div class="row"><button class="btn alt sm" data-ed="${f.id}" title="Изменить дату и время этого матча">📅 Дата/время</button><button class="btn alt sm" data-edref="${f.id}" title="Изменить бригаду арбитров этого матча">⚖️ Судьи</button>${f.status === 'scheduled' ? `<button class="btn sm" data-run="${f.id}">Запуск</button><button class="btn alt sm" data-lu="${f.id}">Составы</button>` : ''}${['done', 'live', 'queued', 'generating'].includes(f.status) ? `<button class="btn alt sm" data-rs="${f.id}">Сбросить</button>` : ''}</div></div>`).join('') : '<div class="empty">Нет матчей. Создайте расписание сезона.</div>'}</div>`;
 
     ab.querySelectorAll('[data-c]').forEach(b => b.onclick = () => { AF.comp = b.dataset.c; AF.round = ''; re(); });
     const rsel = $('#rsel');
@@ -8445,6 +8820,9 @@ async function pgAdmin(app) {
     });
     ab.querySelectorAll('[data-ed]').forEach(b => b.onclick = () => {
       window.openMatchScheduleModal(b.dataset.ed, () => re());
+    });
+    ab.querySelectorAll('[data-edref]').forEach(b => b.onclick = () => {
+      window.openMatchRefereeModal(b.dataset.edref, () => re());
     });
   }
   else if (AT === 'draw') {
@@ -9244,7 +9622,10 @@ async function pgAdmin(app) {
     });
   }
   else if (AT === 'referees') {
-    const rData = await api('/admin/referees');
+    const [rData, fxAll] = await Promise.all([
+      api('/admin/referees'),
+      api('/fixtures').catch(() => [])
+    ]);
     const refs = rData.referees || [];
     const assts = rData.assistants || [];
     ab.innerHTML = `
@@ -9309,7 +9690,73 @@ async function pgAdmin(app) {
           <input id="rf_assign_round" type="number" min="1" value="1" style="width:90px" placeholder="Тур №"/>
           <button class="btn" id="rf_assign_btn">Назначить судей на тур</button>
         </div>
+      </div>
+      <div class="panel" style="margin-top:14px">
+        <h3 style="margin:0 0 6px">⚖️ Назначение бригады арбитров на отдельный матч</h3>
+        <p class="muted small" style="margin:0 0 10px">Выберите любой матч сезона, чтобы вручную поменять главного арбитра, помощников, резервного судью, ВАР и АВАР.</p>
+        <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:8px">
+          <select id="rf_match_comp" style="width:auto">
+            <option value="rpl">РПЛ</option>
+            <option value="cup">FONBET Кубок России</option>
+            <option value="supercup">Суперкубок России</option>
+            <option value="all">Все турниры</option>
+          </select>
+          <select id="rf_match_sel" style="flex:1;min-width:280px"></select>
+          <button class="btn" id="rf_match_edit_btn" type="button">⚖️ Изменить бригаду судей</button>
+        </div>
+        <div id="rf_match_crew_preview" class="small muted"></div>
       </div>`;
+    const rfCompSel = $('#rf_match_comp');
+    const rfMatchSel = $('#rf_match_sel');
+    const rfPreview = $('#rf_match_crew_preview');
+    const fillMatchSelector = () => {
+      const compVal = rfCompSel.value;
+      const curSeason = S.st?.season || S.st?.settings?.season;
+      const allFx = (Array.isArray(fxAll) ? fxAll : []).filter(x => (!curSeason || !x.season || x.season === curSeason) && (compVal === 'all' || x.comp === compVal));
+      const sortedFx = [...allFx].sort((a, b) => {
+        const aDone = a.status === 'done' ? 1 : 0;
+        const bDone = b.status === 'done' ? 1 : 0;
+        if (aDone !== bDone) return aDone - bDone;
+        return String(a.date || '').localeCompare(String(b.date || '')) || (Number(a.round || 0) - Number(b.round || 0));
+      });
+      if (!sortedFx.length) {
+        rfMatchSel.innerHTML = '<option value="">Нет матчей в выбранном турнире</option>';
+        rfPreview.innerHTML = '';
+        return;
+      }
+      const prevVal = rfMatchSel.value;
+      rfMatchSel.innerHTML = sortedFx.map(x => {
+        const sc = x.status === 'done' ? ` (${x.hg}:${x.ag})` : (x.status === 'live' ? ' [LIVE]' : '');
+        const lbl = x.label || compName(x.comp);
+        return `<option value="${e(x.id)}">${e(lbl)} · ${e(x.homeName || teamName(x.home))} — ${e(x.awayName || teamName(x.away))}${sc}</option>`;
+      }).join('');
+      if (prevVal && sortedFx.some(x => x.id === prevVal)) rfMatchSel.value = prevVal;
+      renderCrewPreview();
+    };
+    const renderCrewPreview = () => {
+      const fxObj = (Array.isArray(fxAll) ? fxAll : []).find(x => x.id === rfMatchSel.value);
+      if (!fxObj) { rfPreview.innerHTML = ''; return; }
+      if (!fxObj.refereeName) {
+        rfPreview.innerHTML = 'Текущая бригада: <i>не назначена</i>';
+        return;
+      }
+      rfPreview.innerHTML = `Текущая бригада: <b>${e(fxObj.refereeName)}</b>` +
+        (fxObj.assistants?.length ? ` · Помощники: ${fxObj.assistants.map(e).join(', ')}` : '') +
+        (fxObj.reserveReferee ? ` · Резервный: ${e(fxObj.reserveReferee)}` : '') +
+        (fxObj.varReferee ? ` · ВАР: ${e(fxObj.varReferee)}` : '') +
+        (fxObj.avarReferee ? ` · АВАР: ${e(fxObj.avarReferee)}` : '');
+    };
+    rfCompSel.onchange = fillMatchSelector;
+    rfMatchSel.onchange = renderCrewPreview;
+    fillMatchSelector();
+    $('#rf_match_edit_btn').onclick = () => {
+      const fxObj = (Array.isArray(fxAll) ? fxAll : []).find(x => x.id === rfMatchSel.value);
+      if (!fxObj && !rfMatchSel.value) return toast('Выберите матч');
+      window.openMatchRefereeModal(fxObj || rfMatchSel.value, (savedFx) => {
+        if (fxObj && savedFx && fxObj !== savedFx) Object.assign(fxObj, savedFx);
+        renderCrewPreview();
+      });
+    };
     $('#rf_assign_btn').onclick = async () => {
       const comp = $('#rf_assign_comp').value;
       const round = $('#rf_assign_round').value;
